@@ -81,6 +81,9 @@ def check(tag=None):
     for path in FILES:
         if not (ROOT / path).is_file():
             raise SystemExit('Missing release file: ' + path)
+    client = (ROOT / 'apps/client/src/GameVersion.inc').read_text(encoding='utf8')
+    if f"ClientVersion='{VERSION}'" not in client:
+        raise SystemExit('apps/client/src/GameVersion.inc does not match VERSION ' + VERSION)
     if (ROOT / '.git').exists():
         tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
         bad = [p for p in tracked if p and (Path(p).parts[0] not in DIRECTORIES | FILES or not allowed(p))]

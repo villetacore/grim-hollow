@@ -11,7 +11,7 @@ var Side,BottomPanel,Header:TPanel;
   end;
 begin
   inherited CreateNew(AOwner,1);
-  Caption:='Grim Hollow — Хроники Пепельного предела'; Width:=1320; Height:=940;
+  Caption:='Grim Hollow '+ClientVersion+' — Хроники Пепельного предела'; Width:=1320; Height:=940;
   Constraints.MinWidth:=1160; Constraints.MinHeight:=720;
   if Height>Screen.WorkAreaHeight then Height:=Screen.WorkAreaHeight;
   if Width>Screen.WorkAreaWidth then Width:=Screen.WorkAreaWidth;
@@ -49,7 +49,8 @@ begin
   FClass.Items.Add('Страж — меч и щит, 60 маны');FClass.Items.Add('Арканист — посох, 100 маны');
   FClass.Items.Add('Следопыт — лук, атака на 5 клеток');FClass.Items.Add('Хранитель — булава, усиленная магия');FClass.ItemIndex:=0;
   AddButton('Создать персонажа','HeroButton',452);
-  LabelAt(Self,FPanel,'Герои имеют отдельные вещи, опыт и золото. Для смены героя сначала завершите поход.',16,504,330,80);
+  LabelAt(Self,FPanel,'Герои имеют отдельные вещи, опыт и золото. Для смены героя сначала завершите поход.',16,504,330,60);
+  AddButton('Проверить обновления (версия '+ClientVersion+')','UpdateButton',570);
   FPanel:=PageHost(FTripTab);
   FCode:=AddEdit('Код группы (пусто — новая)','',12);
   AddButton('Подготовить / присоединиться','ExpeditionButton',78);AddButton('Начать — для лидера','StartButton',112);

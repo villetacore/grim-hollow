@@ -2,7 +2,7 @@ unit Main;
 {$mode objfpc}{$H+}{$codepage utf8}
 interface
 uses Classes, SysUtils, Forms, Controls, Graphics, StdCtrls, ExtCtrls, Dialogs,
-  LCLType, LMessages, ComCtrls, fpjson, jsonparser, GameProtocol, GameTransport, GameTheme, GameData, GameRenderer, GameArt, TownWindow, NativeNetwork, FieldGuide, URIParser;
+  LCLType, LMessages, ComCtrls, fpjson, jsonparser, GameProtocol, GameTransport, GameTheme, GameData, GameRenderer, GameArt, TownWindow, NativeNetwork, FieldGuide, URIParser, ClientUpdate;
 
 type
   TGameMap = class(TCustomControl)
@@ -60,6 +60,9 @@ type
     FExploreKey,FTarget,FFacing:string;
     FMode:TComboBox;
     FBagSpecs:TStringList;
+    FManualUpdate:Boolean;
+    procedure UpdateDone(const Info:TUpdateInfo;Installed:Boolean;const Message:string);
+    procedure SelfUpdateTest;
     function Hostiles(W:TJSONData):TJSONArray;
     function PickTarget(W:TJSONData;Range:Integer;Adjacent:Boolean):string;
     procedure CycleTarget;
@@ -301,7 +304,44 @@ begin
 end;
 
 procedure TGameForm.Shown(Sender: TObject);
-begin ResizeLayout(nil);FTimer.Enabled:=True; end;
+begin
+  ResizeLayout(nil);FTimer.Enabled:=True;RemoveOldBinary;
+  if ParamStr(1)='--self-update-test' then begin SelfUpdateTest;Exit;end;
+  // A quiet check in the background; the player decides whether to install.
+  if not FSmoke and SupportsNativeNetwork and (ParamStr(1)<>'--no-update-check') then TUpdateThread.Create(False,Default(TUpdateInfo),@UpdateDone);
+end;
+
+procedure TGameForm.UpdateDone(const Info:TUpdateInfo;Installed:Boolean;const Message:string);
+begin
+  if Installed then begin
+    MessageDlg('Обновление установлено',Message+' Клиент перезапустится.',mtInformation,[mbOK],0);
+    RestartClient;Application.Terminate;Exit;
+  end;
+  if Message<>'' then begin FStatus.Caption:='Обновление не установлено: '+Message;FManualUpdate:=False;Exit;end;
+  if Info.Available then begin
+    if FExpedition<>'' then begin FStatus.Caption:='Доступна версия '+Info.Version+'. Обновите клиент после похода: Аккаунт → «Проверить обновления».';Exit;end;
+    if MessageDlg('Доступно обновление','Вышла версия '+Info.Version+' (у вас '+ClientVersion+'). Скачать и установить сейчас? Клиент перезапустится.',
+      mtConfirmation,[mbYes,mbNo],0)=mrYes then begin
+      FStatus.Caption:='Загрузка обновления '+Info.Version+'…';TUpdateThread.Create(True,Info,@UpdateDone);
+    end;
+  end else if FManualUpdate then begin
+    if Info.Error<>'' then FStatus.Caption:='Не удалось проверить обновления: '+Info.Error
+    else FStatus.Caption:='У вас последняя версия клиента ('+ClientVersion+').';
+  end;
+  FManualUpdate:=False;
+end;
+
+{ Non-interactive end-to-end check of the updater, used to test a release. }
+procedure TGameForm.SelfUpdateTest;
+var Info:TUpdateInfo;Message,Report:string;OK:Boolean;
+begin
+  Info:=CheckForUpdate;OK:=False;Message:='';
+  if Info.Available then OK:=InstallUpdate(Info,Message);
+  Report:='UPDATE_TEST current='+ClientVersion+' latest='+Info.Version+' available='+BoolToStr(Info.Available,True)+
+    ' asset='+Info.AssetName+' installed='+BoolToStr(OK,True)+' error='+Info.Error+' message='+Message;
+  with TStringList.Create do try Text:=Report;SaveToFile(ExtractFilePath(ParamStr(0))+'update-test.txt');finally Free;end;
+  Halt(Ord(not OK));
+end;
 
 procedure TGameForm.ResizeLayout(Sender:TObject);
 var W:Integer; B:TButton;
@@ -417,6 +457,10 @@ var ButtonName, Kind, Value: string; D: TJSONObject; Town:TTownForm;
 begin
   ButtonName:=(Sender as TButton).Name;
   if ButtonName='GuideButton' then begin ShowFieldGuide(Self);Exit;end;
+  if ButtonName='UpdateButton' then begin
+    if not SupportsNativeNetwork then begin FStatus.Caption:='Автообновление есть в Windows-клиенте. Новые версии: '+ReleasePage;Exit;end;
+    FManualUpdate:=True;FStatus.Caption:='Проверяем обновления…';TUpdateThread.Create(False,Default(TUpdateInfo),@UpdateDone);Exit;
+  end;
   if FBusy then begin
     FPendingButton:=ButtonName;
     FStatus.Caption:='Действие принято. Ожидаем ответ сервера…';

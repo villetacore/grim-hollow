@@ -20,6 +20,8 @@ type
     destructor Destroy;override;
   end;
 function NativeHttps(const Url,Token,Body,Method:string;out Status:Integer):string;
+{ HTTPS download for client updates: follows HTTPS-only redirects (release files live on a CDN). }
+function NativeDownload(const Url,Accept:string;MaxBytes:Integer;out Status:Integer):RawByteString;
 function SupportsNativeNetwork:Boolean;
 { WinHTTP WebSockets exist from Windows 8; older systems play over HTTP polling. }
 function SupportsWorldStream:Boolean;
@@ -57,7 +59,7 @@ begin
     Result:=SharedSession;
   finally LeaveCriticalSection(SharedLock);end;
 end;
-procedure OpenRequest(const Url,Method:string;Upgrade,Shared:Boolean;out Session,Connection,Request:HINTERNET);
+procedure OpenRequest(const Url,Method:string;Upgrade,Shared:Boolean;out Session,Connection,Request:HINTERNET;Redirects:Boolean=False);
 var U:TURI;Port:Word;Flags,Policy:DWORD;Host,Path,Verb:UnicodeString;
 begin
   Session:=nil;Connection:=nil;Request:=nil;U:=ParseURI(Url,False);
@@ -72,7 +74,7 @@ begin
   end;
   Connection:=WinHttpConnect(Session,PWideChar(Host),Port,0);Check(Connection<>nil);
   Request:=WinHttpOpenRequest(Connection,PWideChar(Verb),PWideChar(Path),nil,nil,nil,Flags);Check(Request<>nil);
-  Policy:=WINHTTP_OPTION_REDIRECT_POLICY_NEVER;Check(WinHttpSetOption(Request,WINHTTP_OPTION_REDIRECT_POLICY,@Policy,SizeOf(Policy)));
+  if Redirects then Policy:=WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP else Policy:=WINHTTP_OPTION_REDIRECT_POLICY_NEVER;Check(WinHttpSetOption(Request,WINHTTP_OPTION_REDIRECT_POLICY,@Policy,SizeOf(Policy)));
   // Default Windows chain, expiry and hostname checks stay enabled. No ignore-certificate flags.
   if Upgrade then Check(WinHttpSetOption(Request,WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,nil,0));
 end;
@@ -94,9 +96,32 @@ begin
     until N=0;
   finally if Request<>nil then WinHttpCloseHandle(Request);if Connection<>nil then WinHttpCloseHandle(Connection);end;
 end;
+function NativeDownload(const Url,Accept:string;MaxBytes:Integer;out Status:Integer):RawByteString;
+var Session,Connection,Request:HINTERNET;Headers:UnicodeString;Buffer:array[0..65535] of Byte;N,Code,Size:DWORD;Part:RawByteString;
+begin
+  Result:='';Status:=0;Session:=nil;Connection:=nil;Request:=nil;
+  if Copy(Url,1,8)<>'https://' then raise Exception.Create('Updates are downloaded over HTTPS only');
+  try
+    OpenRequest(Url,'GET',False,False,Session,Connection,Request,True);
+    Check(HttpTimeouts(Request,10000,10000,10000,30000));
+    Headers:='Accept: '+UTF8Decode(Accept)+#13#10;
+    Check(WinHttpSendRequest(Request,PWideChar(Headers),Length(Headers),nil,0,0,0));
+    Check(WinHttpReceiveResponse(Request,nil));Size:=SizeOf(Code);
+    Check(WinHttpQueryHeaders(Request,WINHTTP_QUERY_STATUS_CODE or WINHTTP_QUERY_FLAG_NUMBER,nil,@Code,@Size,nil));Status:=Code;
+    repeat
+      N:=0;Check(WinHttpReadData(Request,@Buffer[0],SizeOf(Buffer),@N));
+      if Length(Result)+Int64(N)>MaxBytes then raise Exception.Create('Download too large');
+      SetString(Part,PAnsiChar(@Buffer[0]),N);Result:=Result+Part;
+    until N=0;
+  finally
+    if Request<>nil then WinHttpCloseHandle(Request);if Connection<>nil then WinHttpCloseHandle(Connection);if Session<>nil then WinHttpCloseHandle(Session);
+  end;
+end;
 {$ELSE}
 function NativeHttps(const Url,Token,Body,Method:string;out Status:Integer):string;
 begin Status:=0;Result:='';raise Exception.Create('This Linux build supports local HTTP; native TLS adapter is not included.');end;
+function NativeDownload(const Url,Accept:string;MaxBytes:Integer;out Status:Integer):RawByteString;
+begin Status:=0;Result:='';raise Exception.Create('Updates need HTTPS, which this Linux build does not include.');end;
 {$ENDIF}
 function SupportsNativeNetwork:Boolean;
 begin {$IFDEF WINDOWS}Result:=True;{$ELSE}Result:=False;{$ENDIF}end;
