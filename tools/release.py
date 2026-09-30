@@ -16,9 +16,12 @@ DIRECTORIES = {'.github', 'apps', 'packages', 'content', 'contracts', 'docs', 'i
 FILES = {'.gitignore', '.gitattributes', '.dockerignore', '.editorconfig', 'README.md', 'VERSION', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md', 'Play.cmd'}
 SKIP = {'.git', '.tools', '.agents', '.codex', 'vendor', 'node_modules', '__pycache__', 'backups', 'data', 'bin', 'lib', '.phpunit.cache'}
 SUFFIXES = {'.sql', '.sqlite', '.key', '.pem', '.log', '.pyc', '.ppu', '.o', '.obj', '.or', '.compiled', '.lps', '.bak', '.exe', '.dll'}
+LARAVEL_CACHE_DATA = Path('apps/server/storage/framework/cache/data')
 
 def allowed(path):
     p = Path(path)
+    if p == LARAVEL_CACHE_DATA / '.gitignore':
+        return True
     if any(part in SKIP for part in p.parts):
         return False
     if p.name.startswith('.env'):
@@ -38,7 +41,9 @@ def source_files():
             yield child
         elif child.name in DIRECTORIES and child.is_dir():
             for directory, dirs, names in os.walk(child, followlinks=False):
-                dirs[:] = sorted(d for d in dirs if d not in SKIP and not (Path(directory) / d).is_symlink())
+                dirs[:] = sorted(d for d in dirs
+                                 if (d not in SKIP or (Path(directory) / d).relative_to(ROOT) == LARAVEL_CACHE_DATA)
+                                 and not (Path(directory) / d).is_symlink())
                 for name in sorted(names):
                     f = Path(directory) / name
                     if not f.is_symlink() and allowed(f.relative_to(ROOT)):

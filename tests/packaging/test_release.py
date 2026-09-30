@@ -20,6 +20,32 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(release.allowed('infra/compose/.env.production.example'))
         self.assertTrue(release.allowed('apps/server/storage/framework/views/.gitignore'))
 
+    def test_laravel_cache_placeholder_is_packaged_without_cache_data(self):
+        placeholder = 'apps/server/storage/framework/cache/data/.gitignore'
+        self.assertTrue(release.allowed(placeholder))
+        old_root = release.ROOT
+        with tempfile.TemporaryDirectory() as tmp:
+            release.ROOT = Path(tmp)
+            try:
+                files = {
+                    placeholder: b'*\n!.gitignore\n',
+                    'apps/server/storage/framework/cache/data/cached-value': b'private',
+                    'infra/data/.gitignore': b'*',
+                    'apps/server/vendor/example/.gitignore': b'*',
+                }
+                for name, data in files.items():
+                    path = release.ROOT / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                    if name != placeholder:
+                        self.assertFalse(release.allowed(name))
+                self.assertEqual(
+                    [p.relative_to(release.ROOT).as_posix() for p in release.source_files()],
+                    [placeholder],
+                )
+            finally:
+                release.ROOT = old_root
+
     def test_archive_checksums_and_roundtrip(self):
         old = release.OUT
         with tempfile.TemporaryDirectory() as tmp:
