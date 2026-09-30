@@ -25,7 +25,8 @@ final class Town
         $talents=json_decode(DB::table('characters')->where('id',$id)->value('talents')??'{}',true);
         return ['hero'=>$sheet,'market'=>$market,'talents'=>collect(Catalog::talents())->filter(fn($t)=>$t['class']===$sheet['class_id'])->map(fn($t,$key)=>$t+['rank'=>$talents[$key]??0]),
             'talent_points'=>max(0,intdiv($sheet['level'],3)-array_sum($talents)),
-            'recipes'=>collect(Catalog::recipes())->map(fn($r,$key)=>$r+['name'=>Catalog::items()[$key]['name']]),
+            'recipes'=>collect(Catalog::recipes())->map(fn($r,$key)=>$r+array_intersect_key(Catalog::items()[$key],array_flip(['name','slot','level','damage','armor','power','hp','mana']))),
+            'bounty'=>$sheet['bounty'],
             'guild'=>$guild,'members'=>$members,'invites'=>$invites,'friends'=>$friends,
             'ledger'=>DB::table('economy_ledger')->where('character_id',$id)->orderByDesc('id')->limit(20)->get(['reason','gold_delta','materials_delta','created_at'])];
     }
@@ -42,7 +43,8 @@ final class Town
                 abort_unless($item,404,'item_not_found');abort_if($item->equipped_slot,409,'unequip_first');
                 if($action==='salvage') {
                     $n=Catalog::items()[$item->definition]['level'];DB::table('character_items')->where('id',$item->id)->delete();
-                    DB::table('characters')->where('id',$id)->increment('materials',$n);self::ledger($id,'salvage',0,$n,$ref);
+                    // High-level gear also yields a little essence.
+                    DB::table('characters')->where('id',$id)->update(['materials'=>$c->materials+$n,'essence'=>$c->essence+($n>=5?1:0)]);self::ledger($id,'salvage',0,$n,$ref);
                 } else {
                     abort_if($item->bound,409,'item_bound');$price=$d['price']??0;abort_unless($price>=1&&$price<=1000000,422,'invalid_price');
                     DB::table('character_items')->where('id',$item->id)->update(['escrow'=>true]);
@@ -66,12 +68,19 @@ final class Town
                 }
             } elseif($action==='craft') {
                 $key=$d['target']??'';$recipe=Catalog::recipes()[$key]??null;abort_unless($recipe,422,'invalid_recipe');
-                abort_unless($c->gold>=$recipe['gold']&&$c->materials>=$recipe['materials'],409,'not_enough_resources');
-                DB::table('characters')->where('id',$id)->update(['gold'=>$c->gold-$recipe['gold'],'materials'=>$c->materials-$recipe['materials'],'craft_xp'=>$c->craft_xp+1]);
+                abort_unless($c->gold>=$recipe['gold']&&$c->materials>=$recipe['materials']&&$c->essence>=$recipe['essence'],409,'not_enough_resources');
+                DB::table('characters')->where('id',$id)->update(['gold'=>$c->gold-$recipe['gold'],'materials'=>$c->materials-$recipe['materials'],
+                    'essence'=>$c->essence-$recipe['essence'],'craft_xp'=>$c->craft_xp+1]);
                 (new Characters)->grant($id,$key);self::ledger($id,'craft',-$recipe['gold'],-$recipe['materials'],$ref);
             } elseif($action==='supply') {
                 abort_unless($c->gold>=8,409,'not_enough_gold');abort_if($c->supplies>=30,409,'supply_limit');
                 DB::table('characters')->where('id',$id)->update(['gold'=>$c->gold-8,'supplies'=>$c->supplies+1]);self::ledger($id,'supply',-8,0,$ref);
+            } elseif($action==='distill') {
+                abort_unless($c->gold>=20&&$c->materials>=10,409,'not_enough_resources');
+                DB::table('characters')->where('id',$id)->update(['gold'=>$c->gold-20,'materials'=>$c->materials-10,'essence'=>$c->essence+1]);
+                self::ledger($id,'distill',-20,-10,$ref);
+            } elseif(str_starts_with($action,'bounty_')) {
+                $this->bounty($c,$action,$ref);
             } elseif($action==='respec') {
                 DB::table('characters')->where('id',$id)->update(['strength'=>0,'vitality'=>0,'intellect'=>0,'talents'=>null]);
             } elseif($action==='talent') {
@@ -87,6 +96,21 @@ final class Town
             DB::table('character_operations')->insert(['character_id'=>$id,'operation_id'=>$ref,'payload_hash'=>$hash]);
         },5);
         return $this->overview($account,$id);
+    }
+    private function bounty(object $c,string $action,string $ref): void {
+        $bounty=$c->bounty?json_decode($c->bounty,true):null;
+        if($action==='bounty_take') {
+            abort_if($bounty,409,'bounty_active');
+            $roll=hexdec(substr(hash('sha256',$c->id.$ref),0,7));
+            DB::table('characters')->where('id',$c->id)->update(['bounty'=>json_encode(Catalog::bounty((int)$c->campaign,$roll,intdiv($roll,13)),JSON_UNESCAPED_UNICODE)]);
+        } elseif($action==='bounty_drop') {
+            abort_unless($bounty,409,'bounty_required');DB::table('characters')->where('id',$c->id)->update(['bounty'=>null]);
+        } else {
+            abort_unless($bounty&&$bounty['have']>=$bounty['need'],409,'bounty_incomplete');
+            DB::table('characters')->where('id',$c->id)->update(['bounty'=>null,'gold'=>$c->gold+$bounty['gold'],
+                'materials'=>$c->materials+$bounty['materials'],'essence'=>$c->essence+$bounty['essence']]);
+            self::ledger($c->id,'bounty',$bounty['gold'],$bounty['materials'],$ref);
+        }
     }
     private function guild(object $c,array $d): void {
         $membership=DB::table('guild_members')->where('character_id',$c->id)->first();

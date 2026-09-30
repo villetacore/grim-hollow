@@ -25,7 +25,8 @@ begin
     'Разум: '+JStr(FSheet,'attributes.intellect')+LineEnding+'Свободные очки: '+JStr(FSheet,'points')+LineEnding+LineEnding+
     'Здоровье: '+JStr(FSheet,'stats.max_hp')+'   Мана: '+JStr(FSheet,'stats.max_mana')+LineEnding+
     'Бонус урона: '+JStr(FSheet,'stats.damage_bonus')+'   Броня: '+JStr(FSheet,'stats.armor')+LineEnding+
-    'Сила магии: '+JStr(FSheet,'stats.power');
+    'Сила магии: '+JStr(FSheet,'stats.power')+LineEnding+
+    'Эссенция: '+JStr(FSheet,'essence','0')+'   Огней возвращено: '+JStr(FSheet,'campaign','0');
   FExperience.Max:=JInt(FSheet,'next_level_xp',JInt(FSheet,'xp')+1)-JInt(FSheet,'level_xp');
   FExperience.Position:=JInt(FSheet,'xp')-JInt(FSheet,'level_xp');
   if FExpedition='' then begin
@@ -41,10 +42,10 @@ begin
   if OldIndex>=FBag.Count then OldIndex:=FBag.Count-1;
   if (OldIndex<0) and (FBag.Count>0) then OldIndex:=0;FBag.ItemIndex:=OldIndex;SelectItem(nil);
   OldIndex:=FSpells.ItemIndex;FSpells.Clear;
-  for I:=0 to 3 do begin
-    S:=FSheet.FindPath('spells.'+SpellKey(I));Prefix:='';
+  for I:=0 to SpellCount-1 do begin
+    S:=FSheet.FindPath('spells.'+SpellKey(I));if S=nil then Continue;Prefix:='';
     if LevelValue<JInt(S,'level') then Prefix:='[закрыто] ';
-    FSpells.Items.Add(IntToStr(I+4)+'. '+Prefix+JStr(S,'name')+' (ур.'+JStr(S,'level')+')');
+    FSpells.Items.Add('['+JStr(S,'key')+'] '+Prefix+JStr(S,'name')+' (ур.'+JStr(S,'level')+')');
   end;
   if OldIndex<0 then OldIndex:=0;FSpells.ItemIndex:=OldIndex;SelectSpell(nil);
 end;

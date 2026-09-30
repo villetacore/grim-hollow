@@ -48,7 +48,18 @@ type
     FSessionUntil:QWord;
     FWsInFlight:Boolean;
     FWsSentAt:QWord;
+    // Local clock model of the server tick, and the client-side movement prediction.
+    FSnapshotAt:QWord;
+    FLocalReady:Int64;
+    FLastAction,FLastDirection:string;
+    FPathX,FPathY:array[0..4] of Integer;
+    FPathCount:Integer;
+    FPredUntil:QWord;
     function StreamLive:Boolean;
+    function EstimatedTick:Int64;
+    function CanAct:Boolean;
+    procedure Predict(const Direction:string);
+    procedure ApplyPrediction;
     procedure WorldMessage(const Payload,ErrorText:string);
     procedure FocusGame;
     procedure ResizeLayout(Sender:TObject);
@@ -109,6 +120,81 @@ begin FWorld.Free;FSnapshot.Free; FSheet.Free; FCharacters.Free; inherited Destr
 function TGameForm.StreamLive:Boolean;
 begin Result:=not FSmoke and FStreamSeen and (FWorld<>nil) and not FWorld.Finished; end;
 
+function TGameForm.EstimatedTick:Int64;
+var Elapsed:QWord;
+begin
+  Result:=0;if FSnapshot=nil then Exit;
+  Result:=StrToInt64Def(JStr(FSnapshot,'world.tick'),0);
+  // The server only pushes a snapshot when the view changes; between pushes the tick advances at 10 Hz.
+  Elapsed:=GetTickCount64-FSnapshotAt;if Elapsed>2000 then Elapsed:=2000;
+  Result:=Result+Int64(Elapsed div 100);
+end;
+
+function TGameForm.CanAct:Boolean;
+var Ready:Int64;
+begin
+  Ready:=StrToInt64Def(JStr(FSnapshot,'world.self.ready_at'),0);
+  if FLocalReady>Ready then Ready:=FLocalReady;
+  // The server buffers commands that arrive up to 3 ticks early, so send slightly ahead of time.
+  Result:=EstimatedTick>=Ready-2;
+end;
+
+{ Moves the own hero at once; the next snapshots either confirm the step or cancel the prediction. }
+procedure TGameForm.Predict(const Direction:string);
+var W,Map,E:TJSONData;X,Y,NX,NY,I:Integer;Row:string;
+begin
+  if (FSnapshot=nil) or (FPathCount>=4) then Exit;
+  W:=FSnapshot.FindPath('world');Map:=W.FindPath('map');X:=JInt(W,'self.x');Y:=JInt(W,'self.y');NX:=X;NY:=Y;
+  case Direction of 'north':Dec(NY);'south':Inc(NY);'west':Dec(NX);'east':Inc(NX);else Exit;end;
+  if (NX<0) or (NY<0) or (NX>31) or (NY>31) then Exit;
+  Row:=Map.Items[NY].AsString;if Row[NX+1]<>'.' then Exit;
+  for I:=0 to W.FindPath('enemies').Count-1 do begin E:=W.FindPath('enemies').Items[I];
+    if (JInt(E,'x')=NX) and (JInt(E,'y')=NY) then Exit;end;
+  for I:=0 to W.FindPath('players').Count-1 do begin E:=W.FindPath('players').Items[I];
+    if (JStr(E,'id')<>FHero) and (JInt(E,'x')=NX) and (JInt(E,'y')=NY) and (E.FindPath('outcome').JSONType=jtNull) then Exit;end;
+  if FPathCount=0 then begin FPathX[0]:=X;FPathY[0]:=Y;FPathCount:=1;end;
+  FPathX[FPathCount]:=NX;FPathY[FPathCount]:=NY;Inc(FPathCount);FPredUntil:=GetTickCount64+1500;
+  TJSONObject(W.FindPath('self')).Integers['x']:=NX;TJSONObject(W.FindPath('self')).Integers['y']:=NY;
+  for I:=0 to W.FindPath('players').Count-1 do begin E:=W.FindPath('players').Items[I];
+    if JStr(E,'id')=FHero then begin TJSONObject(E).Integers['x']:=NX;TJSONObject(E).Integers['y']:=NY;end;end;
+  FMap.Invalidate;
+end;
+
+procedure TGameForm.ApplyPrediction;
+var W,E:TJSONData;X,Y,I,Last:Integer;Pending:Boolean;
+begin
+  if (FPathCount=0) or (FSnapshot=nil) then Exit;
+  if GetTickCount64>FPredUntil then begin FPathCount:=0;Exit;end;
+  W:=FSnapshot.FindPath('world');X:=JInt(W,'self.x');Y:=JInt(W,'self.y');Last:=FPathCount-1;
+  // Called for each fresh server snapshot: the final predicted cell confirms the path.
+  if (X=FPathX[Last]) and (Y=FPathY[Last]) then begin FPathCount:=0;Exit;end;
+  Pending:=False;
+  for I:=0 to Last-1 do if (X=FPathX[I]) and (Y=FPathY[I]) then Pending:=True;
+  if not Pending then begin FPathCount:=0;Exit;end;
+  TJSONObject(W.FindPath('self')).Integers['x']:=FPathX[Last];TJSONObject(W.FindPath('self')).Integers['y']:=FPathY[Last];
+  for I:=0 to W.FindPath('players').Count-1 do begin E:=W.FindPath('players').Items[I];
+    if JStr(E,'id')=FHero then begin TJSONObject(E).Integers['x']:=FPathX[Last];TJSONObject(E).Integers['y']:=FPathY[Last];end;end;
+end;
+
+function NearbyHint(W:TJSONData):string;
+var Objects,O:TJSONData;I,X,Y:Integer;
+begin
+  Result:='Esc — фокус на карте. F — открыть сундук, испить из родника, коснуться алтаря.';
+  Objects:=W.FindPath('objects');if Objects=nil then Exit;X:=JInt(W,'self.x');Y:=JInt(W,'self.y');
+  for I:=0 to Objects.Count-1 do begin O:=Objects.Items[I];
+    if (JStr(O,'type')<>'trap') and not JBool(O,'used') and (Abs(JInt(O,'x')-X)+Abs(JInt(O,'y')-Y)<=1) then begin
+      Result:='Рядом: '+GameWord(JStr(O,'type'))+'. Нажмите F, чтобы использовать.';Exit;end;
+  end;
+end;
+
+function ActionCooldown(const ActionName:string):Integer;
+begin
+  case ActionName of
+    'move':Result:=2;'attack':Result:=6;'bash':Result:=12;'guard','potion':Result:=10;
+    'cast':Result:=5;'revive':Result:=30;'interact':Result:=4;
+  else Result:=0;end;
+end;
+
 procedure TGameForm.WorldMessage(const Payload,ErrorText:string);
 var D:TJSONData;Fresh,Kind:string;Rejected:Boolean;
 begin
@@ -119,8 +205,14 @@ begin
       FStreamSnapshot:=Payload;FStreamSeen:=True;
     end else if (Kind='command_result') and FWsInFlight then begin
       FWsInFlight:=False;
-      if JStr(D,'status')='rejected' then begin FStatus.Caption:=FriendlyError(JStr(D,'reason'));Rejected:=True;end
-      else begin FStatus.Caption:='Действие подтверждено сервером.';FAwaitingStream:=GetTickCount64;end;
+      if JStr(D,'status')='rejected' then begin
+        Rejected:=True;FPathCount:=0;FLocalReady:=0;
+        // An early arrival is not an error: silently retry once the hero is ready.
+        if JStr(D,'reason')='cooldown' then begin
+          FLocalReady:=EstimatedTick+3;
+          if FPendingAction='' then begin FPendingAction:=FLastAction;FPendingDirection:=FLastDirection;end;
+        end else FStatus.Caption:=FriendlyError(JStr(D,'reason'));
+      end else FAwaitingStream:=GetTickCount64;
     end else if (Kind='error') and FWsInFlight then begin
       FWsInFlight:=False;FPendingAction:='';FStatus.Caption:='Сервер отклонил действие.';
     end else if Kind='server_paused' then
@@ -204,7 +296,7 @@ begin
   if (FPendingAction='') or (FSnapshot=nil) or (FExpedition='') then Exit;
   if FSnapshot.FindPath('lobby').AsBoolean then Exit;
   W:=FSnapshot.FindPath('world');
-  if StrToInt64(W.FindPath('tick').AsString)<W.FindPath('self.ready_at').AsInt64 then Exit;
+  if (W=nil) or not CanAct then Exit;
   ActionName:=FPendingAction; Direction:=FPendingDirection; FPendingAction:='';
   Action(ActionName,Direction);
 end;
@@ -311,6 +403,7 @@ begin
   else if ButtonName='GuardButton' then Action('guard','')
   else if ButtonName='PotionButton' then Action('potion','')
   else if ButtonName='ReviveButton' then Action('revive','')
+  else if ButtonName='InteractButton' then Action('interact','')
   else if ButtonName='DescendButton' then Action('descend','')
   else if ButtonName='ExtractButton' then Action('extract','');
   if FExpedition<>'' then FocusGame;
@@ -428,7 +521,8 @@ begin
       // The smoke test starts via the same button while a lobby poll is in flight.
     end else if Kind='poll' then begin
       if FSnapshot=nil then FocusGame;
-      ValidateSnapshot(D); FSnapshot.Free; FSnapshot:=D; D:=nil;
+      ValidateSnapshot(D); FSnapshot.Free; FSnapshot:=D; D:=nil;FSnapshotAt:=GetTickCount64;
+      ApplyPrediction;
       W:=FSnapshot.FindPath('world');
       FCode.Text:=JStr(FSnapshot,'join_code');
       FHealth.Max:=JInt(W,'self.max_hp',100);FHealth.Position:=JInt(W,'self.hp');
@@ -438,10 +532,15 @@ begin
       FName.Enabled:=False; FCode.ReadOnly:=True;
       if FSnapshot.FindPath('lobby').AsBoolean then
         FStatus.Caption:='Подготовка группы: движение пока выключено. Лидер должен нажать «Начать».';
-      FStats.Caption:=JStr(W,'self.name')+' | Ур. '+JStr(W,'self.level','1')+' | Этаж '+JStr(W,'floor')+
+      FStats.Caption:=JStr(W,'self.name')+' | Ур. '+JStr(W,'self.level','1')+' | Этаж '+JStr(W,'floor')+'/'+JStr(W,'last_floor','3')+
         ' | HP '+JStr(W,'self.hp')+'/'+JStr(W,'self.max_hp')+' | MP '+JStr(W,'self.mana','60')+
         ' | Зелья '+JStr(W,'self.potions')+' | Добыча: '+JStr(W,'self.gold')+' крон, '+JStr(W,'self.xp')+' XP';
       if W.FindPath('self.loot')<>nil then FStats.Caption:=FStats.Caption+' | Трофеи: '+IntToStr(W.FindPath('self.loot').Count);
+      if JInt(W,'self.essence')>0 then FStats.Caption:=FStats.Caption+' | Эссенция: '+JStr(W,'self.essence');
+      if JInt(W,'self.poison_until')>JInt(W,'tick') then FStats.Caption:=FStats.Caption+' | ОТРАВЛЕН';
+      if JInt(W,'self.might_until')>JInt(W,'tick') then FStats.Caption:=FStats.Caption+' | ЯРОСТЬ';
+      if JInt(W,'self.shield_until')>JInt(W,'tick') then FStats.Caption:=FStats.Caption+' | ЗАЩИТА';
+      if not FSnapshot.FindPath('lobby').AsBoolean then FHelp.Caption:=NearbyHint(W);
       if (JInt(W,'self.hp')=0) and (W.FindPath('self.outcome').JSONType=jtNull) then
         FStatus.Caption:='Вы выведены из боя. Союзник рядом может помочь [R] в течение 20 секунд. Затем остаётся святилище на переходе.';
       if W.FindPath('self.outcome').JSONType<>jtNull then begin
@@ -465,11 +564,16 @@ begin
         end;
       end;
     end else if Kind='command' then begin
-      if D.FindPath('status').AsString='rejected' then FStatus.Caption:=FriendlyError(D.FindPath('reason').AsString)
-      else FStatus.Caption:='Действие подтверждено сервером.';
+      if D.FindPath('status').AsString='rejected' then begin
+        FPathCount:=0;FLocalReady:=0;
+        if D.FindPath('reason').AsString='cooldown' then begin
+          FLocalReady:=EstimatedTick+3;
+          if FPendingAction='' then begin FPendingAction:=FLastAction;FPendingDirection:=FLastDirection;end;
+        end else FStatus.Caption:=FriendlyError(D.FindPath('reason').AsString);
+      end;
     end else if Kind='start' then begin
       FocusGame;
-      FStatus.Caption:='Игра началась! Стрелки или WASD — движение. Вы — синий круг. Найдите золотой выход.';
+      FStatus.Caption:='Игра началась! Стрелки или WASD — движение. Ваш герой — в светлой рамке. Найдите золотой выход.';
     end else if Kind='leave' then begin
       FExpedition:=''; FPendingAction:=''; FCode.Clear; FreeAndNil(FSnapshot); FMap.Invalidate;
       FHeroes.Enabled:=True;if FChannel.ItemIndex=1 then begin FChannel.ItemIndex:=0;ChannelChanged(nil);end;
@@ -501,6 +605,9 @@ begin
   if FWsInFlight and (GetTickCount64-FWsSentAt>3000) then begin
     FWsInFlight:=False;FAwaitingStream:=GetTickCount64-2000;
   end;
+  // Held keys are dispatched from the local tick estimate, not only when a snapshot arrives.
+  if (FPendingAction<>'') and not FWsInFlight then begin DispatchPending;if FBusy then Exit;end;
+  if (FPathCount>0) and (GetTickCount64>FPredUntil) then FPathCount:=0;
   if (FToken<>'') and (FSessionUntil>0) and (GetTickCount64+60000>=FSessionUntil) then begin
     Send('POST','auth/refresh','{}','refresh');Exit;
   end;
@@ -516,7 +623,7 @@ begin
     if FBusy then Exit;
   end;
   Inc(FPollCounter);
-  if not FSmoke and (FHero<>'') and (FPollCounter mod 10=0) then begin ReadChat;if FBusy then Exit;end;
+  if not FSmoke and (FHero<>'') and (FPollCounter mod 20=0) then begin ReadChat;if FBusy then Exit;end;
   if FSmoke and (FToken='') then ButtonClick(FindComponent('RegisterButton'))
   else if FExpedition<>'' then begin
     if not FSmoke and FStreamSeen and (FWorld<>nil) and not FWorld.Finished and
@@ -545,7 +652,7 @@ begin
     FStatus.Caption:='Сначала нажмите «Начать» — сейчас группа ещё в подготовке.'; Exit;
   end;
   W:=FSnapshot.FindPath('world');
-  if FBusy or FWsInFlight or (StrToInt64(W.FindPath('tick').AsString)<W.FindPath('self.ready_at').AsInt64) then begin
+  if FBusy or FWsInFlight or not CanAct then begin
     FPendingAction:=ActionName; FPendingDirection:=Direction; Exit;
   end;
   P:=TJSONObject.Create(['action',ActionName]);
@@ -567,7 +674,7 @@ begin
         end;
       end;P.Add('target_id',Target);
     end;
-    if (Direction='firebolt') or (Direction='frost') then begin
+    if (Direction='firebolt') or (Direction='frost') or (Direction='venom') or (Direction='meteor') then begin
       Enemies:=W.FindPath('enemies');Target:='';BestDistance:=1000;
       for I:=0 to Enemies.Count-1 do begin
         E:=Enemies.Items[I];Distance:=Abs(JInt(E,'x')-JInt(W,'self.x'))+Abs(JInt(E,'y')-JInt(W,'self.y'));
@@ -592,6 +699,9 @@ begin
     P.Add('target_id',Target);
   end;
   CommandId:=NewCommandId;
+  FLastAction:=ActionName;FLastDirection:=Direction;
+  FLocalReady:=EstimatedTick+ActionCooldown(ActionName);
+  if ActionName='move' then Predict(Direction);
   // Prefer the already open world WebSocket: no HTTP request, the result and the new state
   // arrive on the same connection. HTTPS stays as the fallback when the stream is not live.
   if StreamLive then begin
@@ -617,6 +727,8 @@ begin
     VK_SPACE: Action('attack',''); VK_1: Action('bash',''); VK_2: Action('guard','');
     VK_3: Action('potion',''); VK_E: Action('descend',''); VK_X: Action('extract','');
     VK_4: Action('cast','firebolt');VK_5: Action('cast','mend');VK_6: Action('cast','frost');VK_7: Action('cast','nova');
+    VK_8: Action('cast','venom');VK_9: Action('cast','chain');VK_0: Action('cast','barrier');VK_Q: Action('cast','meteor');
+    VK_F: Action('interact','');
     VK_T:ButtonClick(FindComponent('TownButton'));
     VK_R:Action('revive','');
   else Exit; end;

@@ -12,5 +12,7 @@ RUN composer install --no-dev --no-interaction --prefer-dist --optimize-autoload
     && mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs \
     && chown -R www-data:www-data storage bootstrap/cache
 RUN printf 'opcache.enable=1\nopcache.validate_timestamps=0\nexpose_php=Off\n' > /usr/local/etc/php/conf.d/game.ini
+# The stock pool serves only 5 requests at once; with several players they queue behind each other.
+RUN printf '[www]\npm = dynamic\npm.max_children = 24\npm.start_servers = 6\npm.min_spare_servers = 4\npm.max_spare_servers = 10\npm.max_requests = 2000\n' > /usr/local/etc/php-fpm.d/zz-game.conf
 USER www-data
 CMD ["php-fpm", "-F"]

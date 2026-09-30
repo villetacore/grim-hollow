@@ -40,6 +40,10 @@ services:
       mysql: {condition: service_healthy}
   api:
     <<: *app
+    environment:
+      <<: *env
+      # The built-in server handles one request at a time unless it forks workers.
+      PHP_CLI_SERVER_WORKERS: "8"
     depends_on:
       migrate: {condition: service_completed_successfully}
     ports: ["127.0.0.1:8080:8000"]

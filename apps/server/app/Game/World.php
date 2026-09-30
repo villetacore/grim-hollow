@@ -5,13 +5,26 @@ declare(strict_types=1);
 namespace App\Game;
 
 use DomainException;
+use GrimHollow\Core\Catalog;
 use GrimHollow\Core\Game;
 use GrimHollow\Core\Canonical;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Throwable;
 
 final class World
 {
+    /**
+     * Last committed row per expedition, kept by the long-lived world process so that streaming
+     * snapshots do not re-read and re-decode MySQL rows on every tick.
+     * id => ['revision','status','join_code','host_id','state']
+     */
+    private array $rows = [];
+
+    /** "expedition:character" pairs already settled; avoids a settlements lookup per tick. */
+    private array $settled = [];
+
     public static function milliseconds(): int
     {
         return (int) floor(microtime(true) * 1000);
@@ -33,7 +46,7 @@ final class World
                 return DB::table('expeditions')->where('id', $c->active_expedition)->first();
             }
             $id = (string) Str::ulid();
-            abort_unless(isset(\GrimHollow\Core\Catalog::biomes()[$biome]) && $c->campaign>=\GrimHollow\Core\Catalog::biomes()[$biome]['chapter'],409,'biome_locked');
+            abort_unless(isset(Catalog::biomes()[$biome]) && $c->campaign>=Catalog::biomes()[$biome]['chapter'],409,'biome_locked');
             $characters=new Characters; $characters->starter($c);
             $state = Game::create(random_int(1, 2000000000), [$c->id => $characters->profile($c)],$biome);
             DB::table('expeditions')->insert(['id' => $id, 'host_id' => $c->id, 'join_code' => strtoupper(Str::random(10)),
@@ -59,12 +72,13 @@ final class World
             abort_if(DB::table('settlements')->where('expedition_id',$e->id)->where('character_id',$c->id)->exists(),409,'already_left');
             $state = json_decode($e->state, true, 512, JSON_THROW_ON_ERROR);
             abort_if(count($state['players']) >= 4, 409, 'party_full');
-            abort_unless($c->campaign>=\GrimHollow\Core\Catalog::biomes()[$state['biome']??'mines']['chapter'],409,'biome_locked');
+            abort_unless($c->campaign>=Catalog::biomes()[$state['biome']??'mines']['chapter'],409,'biome_locked');
             $names = array_map(static fn ($p) => array_intersect_key($p,array_flip(['name','class_id','level','max_hp','max_mana','damage_bonus','armor','power','equipment','potions'])), $state['players']);
             $characters=new Characters; $characters->starter($c);
             $names[$c->id] = $characters->profile($c);
             $state = Game::create($state['seed'], $names,$state['biome']??'mines');
-            DB::table('expeditions')->where('id', $e->id)->update(['state' => json_encode($state)]);
+            // Bump the revision so open world streams notice the new member.
+            DB::table('expeditions')->where('id', $e->id)->update(['state' => json_encode($state), 'revision' => $e->revision + 1]);
             DB::table('expedition_members')->insert(['expedition_id' => $e->id, 'character_id' => $c->id, 'last_seen' => self::milliseconds()]);
             DB::table('characters')->where('id', $c->id)->update(['active_expedition' => $e->id]);
 
@@ -127,16 +141,65 @@ final class World
         if ($touch) {
             DB::table('expedition_members')->where('expedition_id', $id)->where('character_id', $character)->update(['last_seen' => self::milliseconds()]);
         }
-        $state = json_decode($e->state, true, 512, JSON_THROW_ON_ERROR);
 
-        return ['v' => 1, 'type' => 'snapshot', 'instance_id' => $id, 'revision' => (string) $e->revision,
-            'lobby' => $e->status === 'lobby', 'join_code' => $e->join_code, 'host_id' => $e->host_id, 'world' => Game::view($state, $character)];
+        return $this->view($this->remember($e), $id, $character);
+    }
+
+    /** Builds a player's snapshot from a cached row; membership must already be established. */
+    public function view(array $row, string $id, string $character): array
+    {
+        abort_unless(isset($row['state']['players'][$character]), 404, 'expedition_not_found');
+
+        return ['v' => 1, 'type' => 'snapshot', 'instance_id' => $id, 'revision' => $row['revision'],
+            'lobby' => $row['status'] === 'lobby', 'join_code' => $row['join_code'], 'host_id' => $row['host_id'],
+            'world' => Game::view($row['state'], $character)];
+    }
+
+    public function cached(string $id): ?array
+    {
+        return $this->rows[$id] ?? null;
+    }
+
+    /**
+     * Brings cached rows for the streamed expeditions up to date with one revision query, and
+     * reloads only those changed elsewhere (HTTP commands, joins, starts). Rows not requested
+     * are dropped from the cache.
+     */
+    public function refresh(array $ids): array
+    {
+        $ids = array_values(array_unique($ids));
+        $this->rows = array_intersect_key($this->rows, array_flip($ids));
+        if (! $ids) {
+            return [];
+        }
+        $revisions = DB::table('expeditions')->whereIn('id', $ids)->pluck('revision', 'id');
+        $stale = [];
+        foreach ($ids as $id) {
+            if (! isset($revisions[$id])) {
+                unset($this->rows[$id]);
+            } elseif (($this->rows[$id]['revision'] ?? null) !== (string) $revisions[$id]) {
+                $stale[] = $id;
+            }
+        }
+        if ($stale) {
+            foreach (DB::table('expeditions')->whereIn('id', $stale)->get() as $e) {
+                $this->remember($e);
+            }
+        }
+
+        return $this->rows;
+    }
+
+    private function remember(object $e, ?array $state = null): array
+    {
+        return $this->rows[$e->id] = ['revision' => (string) $e->revision, 'status' => $e->status, 'join_code' => $e->join_code,
+            'host_id' => $e->host_id, 'state' => $state ?? json_decode($e->state, true, 512, JSON_THROW_ON_ERROR)];
     }
 
     public function command(string $id, string $character, string $commandId, array $payload): array
     {
         try { \GrimHollow\Core\Command::validate($payload); } catch(DomainException $error) { abort(422,$error->getMessage()); }
-        return DB::transaction(function () use ($id, $character, $commandId, $payload) {
+        [$result, $row] = DB::transaction(function () use ($id, $character, $commandId, $payload) {
             $e = $this->locked($id, $character);
             ksort($payload);
             $hash = hash('sha256', json_encode($payload));
@@ -144,13 +207,13 @@ final class World
             if ($receipt) {
                 abort_unless(hash_equals($receipt->payload_hash, $hash), 409, 'command_id_reused');
 
-                return json_decode($receipt->result, true);
+                return [json_decode($receipt->result, true), null];
             }
             abort_unless($e->status === 'active', 409, 'not_active');
             $state = json_decode($e->state, true, 512, JSON_THROW_ON_ERROR);
             try {
-                $state = Game::command($state, $character, $payload);
-                $result = ['status' => 'executed'];
+                [$state, $status] = Game::submit($state, $character, $payload);
+                $result = ['status' => $status];
             } catch (DomainException $error) {
                 $result = ['status' => 'rejected', 'reason' => $error->getMessage()];
             }
@@ -159,72 +222,119 @@ final class World
             DB::table('command_receipts')->insert(['expedition_id' => $id, 'character_id' => $character, 'command_id' => $commandId,
                 'payload_hash' => $hash, 'result' => json_encode($result)]);
 
-            return $result;
+            return [$result, ['revision' => (string) ($e->revision + 1), 'status' => $state['status'], 'join_code' => $e->join_code,
+                'host_id' => $e->host_id, 'state' => $state]];
         }, 3);
-    }
-
-    public function tick(): int
-    {
-        $count = 0;
-        $time = self::milliseconds();
-        $ids = DB::table('expeditions')->where('status', 'active')->where('next_tick_at', '<=', $time)->pluck('id');
-        foreach ($ids as $id) {
-            $count += DB::transaction(function () use ($id, $time) {
-                $e = DB::table('expeditions')->where('id', $id)->lockForUpdate()->first();
-                if ($e->status !== 'active' || $e->next_tick_at > $time) {
-                    return 0;
-                }
-                $s = json_decode($e->state, true, 512, JSON_THROW_ON_ERROR);
-                // Server downtime pauses the disconnect grace period as well as combat.
-                if ($e->next_tick_at > 0 && $time - $e->next_tick_at > 1000) {
-                    $downtime = $time - $e->next_tick_at;
-                    foreach (DB::table('expedition_members')->where('expedition_id', $id)->get() as $member) {
-                        DB::table('expedition_members')->where('expedition_id', $id)->where('character_id', $member->character_id)
-                            ->update(['last_seen' => min($time, $member->last_seen + $downtime)]);
-                    }
-                }
-                $absent = DB::table('expedition_members')->where('expedition_id', $id)->where('last_seen', '<', $time - 120000)->pluck('character_id');
-                foreach ($absent as $pid) {
-                    if ($s['players'][$pid]['outcome'] === null) {
-                        $s['players'][$pid]['outcome'] = 'abandoned';
-                    }
-                }
-                $s = Game::tick($s);
-                $this->persist($e, $s, 'tick', ['absent'=>$absent->all()]);
-                // No offline catch-up damage after a server outage.
-                DB::table('expeditions')->where('id', $id)->update(['next_tick_at' => $time + 100]);
-
-                return 1;
-            }, 3);
+        if ($row) {
+            $this->rows[$id] = $row;
         }
 
-        return $count;
+        return $result;
     }
 
-    private function persist(object $e, array $s, string $kind, array $payload): void
+    /**
+     * Advances every due expedition inside one transaction: one commit (and one fsync) per
+     * 100 ms step instead of one per expedition. A failing expedition rolls back to its own
+     * savepoint and does not stall the others.
+     */
+    public function tick(): int
+    {
+        $time = self::milliseconds();
+        $ids = DB::table('expeditions')->where('status', 'active')->where('next_tick_at', '<=', $time)->pluck('id')->all();
+        if (! $ids) {
+            return 0;
+        }
+        $done = DB::transaction(function () use ($ids, $time) {
+            $done = [];
+            $rows = DB::table('expeditions')->whereIn('id', $ids)->orderBy('id')->lockForUpdate()->get();
+            $members = DB::table('expedition_members')->whereIn('expedition_id', $ids)->get()->groupBy('expedition_id');
+            foreach ($rows as $e) {
+                if ($e->status !== 'active' || $e->next_tick_at > $time) {
+                    continue;
+                }
+                try {
+                    $done[$e->id] = DB::transaction(fn () => $this->advance($e, $members[$e->id] ?? collect(), $time));
+                } catch (Throwable $error) {
+                    report($error);
+                }
+            }
+
+            return $done;
+        }, 3);
+        foreach ($done as $id => $row) {
+            $this->rows[$id] = $row;
+        }
+        if (count($this->settled) > 50000) {
+            $this->settled = [];
+        }
+
+        return count($done);
+    }
+
+    private function advance(object $e, Collection $members, int $time): array
+    {
+        $s = json_decode($e->state, true, 512, JSON_THROW_ON_ERROR);
+        // Server downtime pauses the disconnect grace period as well as combat.
+        if ($e->next_tick_at > 0 && $time - $e->next_tick_at > 1000) {
+            $downtime = $time - $e->next_tick_at;
+            foreach ($members as $member) {
+                $member->last_seen = min($time, $member->last_seen + $downtime);
+                DB::table('expedition_members')->where('expedition_id', $e->id)->where('character_id', $member->character_id)
+                    ->update(['last_seen' => $member->last_seen]);
+            }
+        }
+        $absent = $members->filter(fn ($m) => $m->last_seen < $time - 120000)->pluck('character_id')->values();
+        foreach ($absent as $pid) {
+            if (isset($s['players'][$pid]) && $s['players'][$pid]['outcome'] === null) {
+                $s['players'][$pid]['outcome'] = 'abandoned';
+            }
+        }
+        $s = Game::tick($s);
+        // No offline catch-up damage after a server outage.
+        $this->persist($e, $s, 'tick', ['absent' => $absent->all()], ['next_tick_at' => $time + 100]);
+
+        return ['revision' => (string) ($e->revision + 1), 'status' => $s['status'], 'join_code' => $e->join_code, 'host_id' => $e->host_id, 'state' => $s];
+    }
+
+    private function persist(object $e, array $s, string $kind, array $payload, array $extra = []): void
     {
         $json = Canonical::json($s);
         DB::table('expeditions')->where('id', $e->id)->update(['state' => $json, 'status' => $s['status'],
-            'revision' => $e->revision + 1, 'updated_at' => now()]);
+            'revision' => $e->revision + 1, 'updated_at' => now()] + $extra);
         DB::table('game_events')->insert(['expedition_id' => $e->id, 'revision' => $e->revision + 1, 'kind' => $kind,
             'payload' => json_encode($payload), 'state_hash' => hash('sha256', $json), 'created_at' => now()]);
         // The entire current snapshot and economic settlement share a transaction.
         foreach ($s['players'] as $id => $p) {
-            if ($p['outcome'] === null || DB::table('settlements')->where('expedition_id', $e->id)->where('character_id', $id)->exists()) {
+            if ($p['outcome'] === null || isset($this->settled[$e->id.':'.$id])) {
+                continue;
+            }
+            if (DB::table('settlements')->where('expedition_id', $e->id)->where('character_id', $id)->exists()) {
+                $this->settled[$e->id.':'.$id] = true;
                 continue;
             }
             $c = DB::table('characters')->where('id', $id)->lockForUpdate()->first();
-            $gold = $p['outcome'] === 'extracted' ? $p['gold'] : 0;
-            $xp = $p['outcome'] === 'extracted' ? $p['xp'] : intdiv($p['xp'],4);
-            $chapter=\GrimHollow\Core\Catalog::biomes()[$s['biome']??'mines']['chapter'];
-            $won=$p['outcome']==='extracted' && $s['floor']===3 && isset($s['enemies']['boss']) && $s['enemies']['boss']['hp']===0;
+            $extracted = $p['outcome'] === 'extracted';
+            $gold = $extracted ? $p['gold'] : 0;
+            $xp = $extracted ? $p['xp'] : intdiv($p['xp'],4);
+            $essence = $extracted ? (int) ($p['essence'] ?? 0) : 0;
+            $area = Catalog::biomes()[$s['biome']??'mines'];
+            $chapter = $area['chapter'];
+            $won=$extracted && $s['floor']===Game::lastFloor($s) && isset($s['enemies']['boss']) && $s['enemies']['boss']['hp']===0;
             if ($won && $c->campaign===$chapter) { $gold+=50*($chapter+1);$xp+=40*($chapter+1); }
             DB::table('settlements')->insert(['expedition_id' => $e->id, 'character_id' => $id, 'outcome' => $p['outcome'],
                 'gold' => $gold, 'xp' => $xp, 'created_at' => now(), 'updated_at' => now()]);
-            DB::table('characters')->where('id',$id)->update(['gold' => $c->gold + $gold, 'xp' => $c->xp + $xp, 'active_expedition' => null]);
-            if ($won) DB::table('characters')->where('id',$id)->update(['campaign'=>max($c->campaign,$chapter+1)]);
+            $update = ['gold' => $c->gold + $gold, 'xp' => $c->xp + $xp, 'essence' => $c->essence + $essence, 'active_expedition' => null];
+            // Bounty progress counts only for heroes who made it back to report.
+            $bounty = $c->bounty ? json_decode($c->bounty, true) : null;
+            if ($extracted && $bounty && isset($p['slain'][$bounty['type']])) {
+                $bounty['have'] = min($bounty['need'], $bounty['have'] + $p['slain'][$bounty['type']]);
+                $update['bounty'] = json_encode($bounty, JSON_UNESCAPED_UNICODE);
+            }
+            if ($won) $update['campaign'] = max($c->campaign, $chapter + 1);
+            DB::table('characters')->where('id',$id)->update($update);
             Town::ledger($id,'expedition',$gold,0,$e->id);
-            if ($p['outcome']==='extracted') foreach ($p['loot']??[] as $key) (new Characters)->grant($id,$key);
+            if ($extracted) foreach ($p['loot']??[] as $key) (new Characters)->grant($id,$key);
+            $this->settled[$e->id.':'.$id] = true;
         }
     }
 }

@@ -71,7 +71,7 @@ $worker->onMessage = function ($c, $raw) use (&$clients, $world, $worker) {
             $session += ['character_id' => $t->character_id, 'expedition_id' => $t->expedition_id,'session_hash'=>$t->session_hash,'checked_at'=>time()];
             $session['authenticated'] = true;
             $c->send(json_encode(['v' => 1, 'type' => 'welcome', 'tick_rate' => 10]));
-            $c->send(json_encode($world->snapshot($t->expedition_id, $t->character_id)));
+            push($c, $session, $world->snapshot($t->expedition_id, $t->character_id));
 
             return;
         }
@@ -93,12 +93,11 @@ $worker->onMessage = function ($c, $raw) use (&$clients, $world, $worker) {
             }
         }
         $c->send(json_encode($world->command($session['expedition_id'], $session['character_id'], $m['command_id'], $m['payload'])));
-        // Push the post-command state now instead of waiting for the next 100 ms tick.
+        // Push the post-command state now, from memory, instead of waiting for the next tick.
         try {
-            $view = $world->snapshot($session['expedition_id'], $session['character_id'], false);
-            if (($session['revision'] ?? null) !== $view['revision']) {
-                $c->send(json_encode($view));
-                $session['revision'] = $view['revision'];
+            $row = $world->cached($session['expedition_id']);
+            if ($row) {
+                push($c, $session, $world->view($row, $session['expedition_id'], $session['character_id']));
             }
         } catch (Throwable $e) {
             report($e);
@@ -111,10 +110,31 @@ $worker->onMessage = function ($c, $raw) use (&$clients, $world, $worker) {
         report($e);
     }
 };
+
+/**
+ * Sends a snapshot only when what the player sees has changed. The client extrapolates the tick
+ * from its own clock, so an unchanged view is refreshed at most once per second.
+ */
+function push(TcpConnection $c, array &$session, array $view): void
+{
+    $world = $view['world'];
+    unset($world['tick']);
+    $hash = md5(json_encode([$world, $view['lobby'], $view['join_code']]));
+    $now = microtime(true);
+    if ($hash === ($session['view_hash'] ?? null) && $now - ($session['sent_at'] ?? 0) < 1.0) {
+        return;
+    }
+    $c->send(json_encode($view, JSON_UNESCAPED_UNICODE));
+    $session['view_hash'] = $hash;
+    $session['sent_at'] = $now;
+}
+
 $worker->onWorkerStart = function () use ($world, $worker, &$clients) {
-    Timer::add(0.1, function () use ($world, $worker, &$clients) {
+    $checkedAt = 0;
+    Timer::add(0.1, function () use ($world, $worker, &$clients, &$checkedAt) {
         try {
             $world->tick();
+            $live = [];
             foreach ($worker->connections as $c) {
                 $s = $clients[$c->id] ?? null;
                 if (! $s) {
@@ -125,27 +145,41 @@ $worker->onWorkerStart = function () use ($world, $worker, &$clients) {
                         $c->close();
                     }
 
-continue;
+                    continue;
                 }
                 if (time() - $s['last_seen'] > 30) {
                     $c->close();
 
                     continue;
                 }
-                if(time()-($s['checked_at']??0)>=5){
-                    if(!DB::table('game_sessions')->where('token_hash',$s['session_hash'])->where('expires_at','>',now())->exists()){$c->close();continue;}
-                    $clients[$c->id]['checked_at']=time();
+                $live[$c->id] = $c;
+            }
+            // Session and membership checks for every stream at once, every 5 seconds.
+            if ($live && time() - $checkedAt >= 5) {
+                $checkedAt = time();
+                $hashes = array_map(fn ($c) => $clients[$c->id]['session_hash'], $live);
+                $valid = DB::table('game_sessions')->whereIn('token_hash', array_unique($hashes))->where('expires_at', '>', now())->pluck('token_hash')->flip();
+                $members = DB::table('expedition_members')->whereIn('character_id', array_unique(array_map(fn ($c) => $clients[$c->id]['character_id'], $live)))
+                    ->get()->map(fn ($m) => $m->expedition_id.':'.$m->character_id)->flip();
+                foreach ($live as $id => $c) {
+                    $s = $clients[$id];
+                    if (! isset($valid[$s['session_hash']]) || ! isset($members[$s['expedition_id'].':'.$s['character_id']])) {
+                        $c->close();
+                        unset($live[$id]);
+                    }
                 }
-                try {
-                    $view = $world->snapshot($s['expedition_id'], $s['character_id'], false);
-                } catch (\Symfony\Component\HttpKernel\Exception\NotFoundHttpException $e) {
+            }
+            $rows = $world->refresh(array_map(fn ($c) => $clients[$c->id]['expedition_id'], $live));
+            foreach ($live as $id => $c) {
+                $s = &$clients[$id];
+                $row = $rows[$s['expedition_id']] ?? null;
+                if (! $row || ! isset($row['state']['players'][$s['character_id']])) {
+                    unset($s);
                     $c->close();
                     continue;
                 }
-                if (($s['revision'] ?? null) !== $view['revision']) {
-                    $c->send(json_encode($view));
-                    $clients[$c->id]['revision'] = $view['revision'];
-                }
+                push($c, $s, $world->view($row, $s['expedition_id'], $s['character_id']));
+                unset($s);
             }
         } catch (Throwable $e) {
             report($e);

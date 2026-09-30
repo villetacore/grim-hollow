@@ -21,7 +21,8 @@ begin
   C.TextOut(26,58,JStr(W,'biome_name','Затопленные шахты')+' / Этаж '+JStr(W,'floor'));
   C.Font.Color:=$008DC5DC;
   if Snapshot.FindPath('lobby').AsBoolean then C.TextOut(26,80,'Сбор группы. Лидер начинает поход кнопкой справа.')
-  else C.TextOut(26,80,'Стрелки / WASD — шаг   Space — атака   4–7 — магия   X — эвакуация');
+  else if JInt(W,'floor')>=JInt(W,'last_floor',3) then C.TextOut(26,80,'Последний этаж: '+JStr(W,'boss_name')+' стережёт выход.   F — сундук   X — эвакуация')
+  else C.TextOut(26,80,'Стрелки / WASD — шаг   Space — атака   F — сундук   4–0, Q — магия   E — ниже   X — эвакуация');
   S:=32;if Surface.Height<500 then S:=24;
   Columns:=Min(32,(Surface.Width-40) div S);Rows:=Min(32,(Surface.Height-208) div S);Rows:=Max(7,Rows);
   LeftCell:=EnsureRange(JInt(W,'self.x')-Columns div 2,0,32-Columns);TopCell:=EnsureRange(JInt(W,'self.y')-Rows div 2,0,32-Rows);
@@ -39,11 +40,17 @@ begin
       for I:=1 to 5 do begin C.MoveTo(PX+I*2,PY+I*5);C.LineTo(PX+S-I*2,PY+I*5);end;
     end;
   end;
+  Entities:=W.FindPath('objects');
+  if Entities<>nil then for J:=0 to Entities.Count-1 do begin E:=Entities.Items[J];X:=JInt(E,'x');Y:=JInt(E,'y');
+    if (X<LeftCell) or (X>=LeftCell+Columns) or (Y<TopCell) or (Y>=TopCell+Rows) then Continue;
+    DungeonObject(C,OX+(X-LeftCell)*S,OY+(Y-TopCell)*S,S,JStr(E,'type'),JBool(E,'used'));
+  end;
   for I:=0 to 1 do begin if I=0 then Entities:=W.FindPath('enemies') else Entities:=W.FindPath('players');
     for J:=0 to Entities.Count-1 do begin E:=Entities.Items[J];X:=JInt(E,'x');Y:=JInt(E,'y');
       if (X<LeftCell) or (X>=LeftCell+Columns) or (Y<TopCell) or (Y>=TopCell+Rows) then Continue;
       Kind:=JStr(E,'type',JStr(E,'class_id','guardian'));
       Figure(C,OX+(X-LeftCell)*S,OY+(Y-TopCell)*S,S,Kind,I=1,JStr(E,'id')=Hero,JInt(E,'hp'));
+      if I=0 then EnemyMarks(C,OX+(X-LeftCell)*S,OY+(Y-TopCell)*S,S,JInt(E,'hp'),JInt(E,'max_hp'),JBool(E,'elite'),JBool(E,'boss'));
     end;
   end;
   Frame(C,Rect(OX-3,OY-3,OX+Columns*S+3,OY+Rows*S+3));

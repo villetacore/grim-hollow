@@ -37,10 +37,11 @@ final class Characters
             $progress=Catalog::progression((int)$c->xp);
             $items=DB::table('character_items')->where('character_id',$id)->where('escrow',false)->orderBy('created_at')->orderBy('id')->get()->map(fn($i)=>(array)$i+Catalog::items()[$i->definition]);
             return ['id'=>$id,'name'=>$c->name,'class_id'=>$c->class_id,'gold'=>(int)$c->gold,'xp'=>(int)$c->xp,
-                'active_expedition'=>$c->active_expedition,'campaign'=>$c->campaign,'materials'=>$c->materials,'supplies'=>$c->supplies,'craft_xp'=>$c->craft_xp,
+                'active_expedition'=>$c->active_expedition,'campaign'=>$c->campaign,'materials'=>$c->materials,'essence'=>(int)($c->essence??0),
+                'bounty'=>$c->bounty?json_decode($c->bounty,true):null,'supplies'=>$c->supplies,'craft_xp'=>$c->craft_xp,
                 'biomes'=>Catalog::biomes(),'attributes'=>['strength'=>$c->strength,'vitality'=>$c->vitality,'intellect'=>$c->intellect],
                 'points'=>max(0,($progress['level']-1)*2-$c->strength-$c->vitality-$c->intellect),
-                'stats'=>$this->profile($c),'items'=>$items,'spells'=>Catalog::spells()]+$progress;
+                'stats'=>$this->profile($c),'items'=>$items,'spells'=>Catalog::spells(),'enemies'=>Catalog::enemies(),'objects'=>Catalog::objects()]+$progress;
         },3);
     }
     public function manage(int $account,string $id,array $d): array

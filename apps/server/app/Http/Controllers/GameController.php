@@ -74,7 +74,7 @@ final class GameController
 
     public function expedition(Request $r, World $world)
     {
-        $d = $r->validate(['character_id' => 'required|ulid', 'join_code' => 'nullable|string|size:10','biome'=>'sometimes|in:mines,monastery,roots']);
+        $d = $r->validate(['character_id' => 'required|ulid', 'join_code' => 'nullable|string|size:10','biome'=>'sometimes|in:'.implode(',',array_keys(\GrimHollow\Core\Catalog::biomes()))]);
         $c = $world->character($r->attributes->get('account_id'), $d['character_id']);
         $e = empty($d['join_code']) ? $world->create($c,$d['biome']??'mines') : $world->join($c, $d['join_code']);
 
@@ -109,7 +109,7 @@ final class GameController
     public function command(Request $r, World $world, string $id)
     {
         $d = $r->validate(['character_id' => 'required|ulid', 'command_id' => 'required|uuid', 'payload' => 'required|array',
-            'payload.action' => 'required|in:move,attack,bash,guard,potion,extract,descend,cast,revive', 'payload.spell_id'=>'sometimes|in:firebolt,mend,frost,nova',
+            'payload.action' => 'required|in:move,attack,bash,guard,potion,extract,descend,cast,revive,interact', 'payload.spell_id'=>'sometimes|in:'.implode(',',array_keys(\GrimHollow\Core\Catalog::spells())),
             'payload.direction' => 'sometimes|in:north,south,east,west', 'payload.target_id' => 'sometimes|string|max:26']);
         $c = $world->character($r->attributes->get('account_id'), $d['character_id']);
 
