@@ -21,10 +21,26 @@ type
   end;
 function NativeHttps(const Url,Token,Body,Method:string;out Status:Integer):string;
 function SupportsNativeNetwork:Boolean;
+{ WinHTTP WebSockets exist from Windows 8; older systems play over HTTP polling. }
+function SupportsWorldStream:Boolean;
 implementation
 {$IFDEF WINDOWS}
 uses Windows,WinHttp,URIParser;
 function HttpTimeouts(H:HINTERNET;ResolveMS,ConnectMS,SendMS,ReceiveMS:Integer):LongBool;stdcall;external 'winhttp.dll' name 'WinHttpSetTimeouts';
+// Resolved at run time so that the client still starts on Windows XP/Vista/7.
+type
+  TWsUpgrade=function(hRequest:HINTERNET;pContext:DWORD_PTR):HINTERNET;stdcall;
+  TWsSend=function(hWebSocket:HINTERNET;eBufferType:WINHTTP_WEB_SOCKET_BUFFER_TYPE;pvBuffer:Pointer;dwBufferLength:DWORD):DWORD;stdcall;
+  TWsReceive=function(hWebSocket:HINTERNET;pvBuffer:Pointer;dwBufferLength:DWORD;pdwBytesRead:LPDWORD;peBufferType:PWINHTTP_WEB_SOCKET_BUFFER_TYPE):DWORD;stdcall;
+var WsUpgrade:TWsUpgrade=nil;WsSend:TWsSend=nil;WsReceive:TWsReceive=nil;
+procedure LoadWebSockets;
+var H:HMODULE;
+begin
+  H:=LoadLibrary('winhttp.dll');if H=0 then Exit;
+  Pointer(WsUpgrade):=GetProcAddress(H,'WinHttpWebSocketCompleteUpgrade');
+  Pointer(WsSend):=GetProcAddress(H,'WinHttpWebSocketSend');
+  Pointer(WsReceive):=GetProcAddress(H,'WinHttpWebSocketReceive');
+end;
 procedure Check(OK:Boolean);
 begin if not OK then raise Exception.Create('Windows network error '+IntToStr(GetLastError));end;
 var SharedSession:HINTERNET=nil;SharedLock:TRTLCriticalSection;
@@ -84,6 +100,8 @@ begin Status:=0;Result:='';raise Exception.Create('This Linux build supports loc
 {$ENDIF}
 function SupportsNativeNetwork:Boolean;
 begin {$IFDEF WINDOWS}Result:=True;{$ELSE}Result:=False;{$ENDIF}end;
+function SupportsWorldStream:Boolean;
+begin {$IFDEF WINDOWS}Result:=Assigned(WsUpgrade) and Assigned(WsSend) and Assigned(WsReceive);{$ELSE}Result:=False;{$ENDIF}end;
 constructor TWorldConnection.Create(const Url,Ticket:string;Callback:TWorldMessage);
 begin inherited Create(True);FUrl:=Url;FTicket:=Ticket;FCallback:=Callback;InitCriticalSection(FLock);Start;end;
 procedure TWorldConnection.Deliver;
@@ -97,7 +115,7 @@ begin
   EnterCriticalSection(FLock);
   try
     if (FSocket<>nil) and not Terminated then
-      Result:=WinHttpWebSocketSend(FSocket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload))=0;
+      Result:=WsSend(FSocket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload))=0;
   finally LeaveCriticalSection(FLock);end;
   {$ENDIF}
 end;
@@ -121,21 +139,21 @@ begin
     try
       OpenRequest(FUrl,'GET',True,False,Session,Connection,Request);
       Check(WinHttpSendRequest(Request,nil,0,nil,0,0,0));Check(WinHttpReceiveResponse(Request,nil));
-      Socket:=WinHttpWebSocketCompleteUpgrade(Request,0);Check(Socket<>nil);
+      Socket:=WsUpgrade(Request,0);Check(Socket<>nil);
       EnterCriticalSection(FLock);FSocket:=Socket;LeaveCriticalSection(FLock);
       Payload:='{"v":1,"type":"hello","ticket":"'+FTicket+'"}';
-      Code:=WinHttpWebSocketSend(Socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload));
+      Code:=WsSend(Socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload));
       if Code<>0 then raise Exception.Create('WebSocket hello failed '+IntToStr(Code));
       LastPing:=GetTickCount64;FMessage:='';
       while not Terminated do begin
         if GetTickCount64-LastPing>5000 then begin
           Payload:='{"v":1,"type":"ping"}';
           EnterCriticalSection(FLock);
-          try Code:=WinHttpWebSocketSend(Socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload));
+          try Code:=WsSend(Socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload));
           finally LeaveCriticalSection(FLock);end;
           if Code<>0 then raise Exception.Create('WebSocket ping failed');LastPing:=GetTickCount64;
         end;
-        N:=0;Code:=WinHttpWebSocketReceive(Socket,@Buffer[0],SizeOf(Buffer),@N,@BufferType);
+        N:=0;Code:=WsReceive(Socket,@Buffer[0],SizeOf(Buffer),@N,@BufferType);
         if Terminated then Break;
         if Code=12002 then Continue;
         if Code<>0 then raise Exception.Create('WebSocket receive failed '+IntToStr(Code));
@@ -155,7 +173,7 @@ begin
 end;
 {$IFDEF WINDOWS}
 initialization
-  InitCriticalSection(SharedLock);
+  InitCriticalSection(SharedLock);LoadWebSockets;
 finalization
   if SharedSession<>nil then WinHttpCloseHandle(SharedSession);
   DoneCriticalSection(SharedLock);

@@ -81,6 +81,35 @@ jobs:
           path: dist/releases/*-windows-x64.zip
           if-no-files-found: error
 
+  windows-legacy:
+    # Experimental 32-bit client for Windows XP/Vista/7; its failure never blocks a release.
+    runs-on: windows-2022
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install 32-bit Lazarus 2.2.6 (last line with Windows XP support)
+        shell: pwsh
+        run: |
+          $url = 'https://downloads.sourceforge.net/project/lazarus/Lazarus%20Windows%2032%20bits/Lazarus%202.2.6/lazarus-2.2.6-fpc-3.2.2-win32.exe'
+          Invoke-WebRequest -Uri $url -OutFile lazarus32.exe -UserAgent 'Wget' -MaximumRedirection 10
+          Start-Process -Wait -FilePath .\lazarus32.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/DIR=C:\lazarus32'
+          if (-not (Test-Path C:\lazarus32\lazbuild.exe)) { throw 'Lazarus 32-bit was not installed' }
+      - name: Compile and package the legacy client
+        shell: pwsh
+        run: |
+          & C:\lazarus32\lazbuild.exe --lazarusdir=C:\lazarus32 --widgetset=win32 --cpu=i386 --os=win32 apps/client/GrimHollow.lpi
+          if ($LASTEXITCODE -ne 0) { throw 'Legacy client compilation failed' }
+          python tools/release.py client --platform windows-x86-legacy --binary build/client/win32/grim-hollow.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-legacy
+          path: dist/releases/*-windows-x86-legacy.zip
+          if-no-files-found: error
+
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

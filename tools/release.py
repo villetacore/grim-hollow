@@ -92,7 +92,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('kind', choices=['check', 'source', 'server', 'client', 'checksums'])
     parser.add_argument('--tag')
-    parser.add_argument('--platform', choices=['windows-x64', 'linux-x64'])
+    parser.add_argument('--platform', choices=['windows-x64', 'windows-x86-legacy', 'linux-x64'])
     parser.add_argument('--binary', type=Path)
     args = parser.parse_args()
     check(args.tag)

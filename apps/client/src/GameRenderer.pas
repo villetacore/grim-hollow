@@ -17,7 +17,8 @@ const
   { Action bar: key label, skill id (spells use their catalog key). }
   BarKeys:array[0..15] of string=('Sp','1','2','3','4','5','6','7','8','9','0','Q','Z','C','V','G');
   BarSkills:array[0..15] of string=('attack','bash','guard','potion','firebolt','mend','frost','nova','venom','chain','barrier','meteor','blink','fire_wave','whirlwind','drain_life');
-procedure RenderMap(Surface:TCustomControl;Snapshot:TJSONData;var View:TMapView);
+{ Draws on any canvas (the map control, or an off-screen bitmap for README screenshots). }
+procedure RenderMap(C:TCanvas;Width,Height:Integer;Snapshot:TJSONData;var View:TMapView);
 procedure ClearExplored(var View:TMapView);
 procedure Explore(var View:TMapView;Map:TJSONData);
 implementation
@@ -70,18 +71,18 @@ begin
   end;
 end;
 
-procedure RenderMap(Surface:TCustomControl;Snapshot:TJSONData;var View:TMapView);
-var C:TCanvas;W,Map,Entities,E,Log,ExitCell:TJSONData;
+procedure RenderMap(C:TCanvas;Width,Height:Integer;Snapshot:TJSONData;var View:TMapView);
+var W,Map,Entities,E,Log,ExitCell:TJSONData;
   X,Y,I,J,S,OX,OY,Columns,Rows,LeftCell,TopCell,PX,PY,MX,MY,Bar:Integer;Row,Seen,Biome,Kind:string;Duel:Boolean;
 begin
-  C:=Surface.Canvas;C.Brush.Style:=bsSolid;C.Brush.Color:=$001A1E20;C.FillRect(Surface.ClientRect);
+  C.Brush.Style:=bsSolid;C.Brush.Color:=$001A1E20;C.FillRect(Rect(0,0,Width,Height));
   C.Font.Name:='Georgia';C.Font.Color:=$008DC5DC;C.Font.Size:=25;C.TextOut(24,15,'GRIM HOLLOW');
   C.Font.Name:='Tahoma';C.Font.Size:=10;C.Font.Color:=$008D9B9F;
   View.S:=0;
   if (Snapshot=nil) or (View.Expedition='') then begin
-    C.TextOut(26,61,'ПЕПЕЛЬНЫЙ ПРЕДЕЛ  /  ХРОНИКИ ТРЁХ ОГНЕЙ');TownScene(C,Surface.Width,Surface.Height);
-    C.Font.Color:=$008DC5DC;C.Brush.Style:=bsClear;C.TextOut(26,Surface.Height-70,'Город [T]: кузница, рынок, аптекарь, контракты, гильдия и таблица лидеров.');
-    C.Font.Color:=clSilver;C.TextOut(26,Surface.Height-46,'Аккаунт → герой → снаряжение → Поход (или Дуэль) → Подготовить → Начать.');Exit;
+    C.TextOut(26,61,'ПЕПЕЛЬНЫЙ ПРЕДЕЛ  /  ХРОНИКИ ТРЁХ ОГНЕЙ');TownScene(C,Width,Height);
+    C.Font.Color:=$008DC5DC;C.Brush.Style:=bsClear;C.TextOut(26,Height-70,'Город [T]: кузница, рынок, аптекарь, контракты, гильдия и таблица лидеров.');
+    C.Font.Color:=clSilver;C.TextOut(26,Height-46,'Аккаунт → герой → снаряжение → Поход (или Дуэль) → Подготовить → Начать.');Exit;
   end;
   W:=Snapshot.FindPath('world');Map:=W.FindPath('map');Biome:=JStr(W,'biome','mines');Duel:=JStr(W,'mode')='duel';
   if Duel then C.TextOut(26,58,'АРЕНА — дуэль до победы. Осталось '+IntToStr(Max(0,1800-JInt(W,'tick')) div 10)+' с.')
@@ -91,10 +92,10 @@ begin
   else if Duel then C.TextOut(26,80,'Щёлкните соперника или Tab — цель. Space — удар, 4–0/Q/Z/C/V/G — умения.')
   else if JInt(W,'floor')=JInt(W,'boss_floor',3) then C.TextOut(26,80,'Здесь босс: '+JStr(W,'boss_name')+'. После победы — глубже [E] или домой [X].')
   else C.TextOut(26,80,'Босс на глубине '+JStr(W,'boss_floor')+'. Клик/Tab — цель, F — сундук, E — ниже, X — эвакуация.');
-  S:=32;if Surface.Height<560 then S:=24;Bar:=Min(34,Max(22,(Surface.Width-60) div 16-4));
-  Columns:=Min(32,(Surface.Width-40) div S);Rows:=Min(32,(Surface.Height-114-Bar-80) div S);Rows:=Max(7,Rows);
+  S:=32;if Height<560 then S:=24;Bar:=Min(34,Max(22,(Width-60) div 16-4));
+  Columns:=Min(32,(Width-40) div S);Rows:=Min(32,(Height-114-Bar-80) div S);Rows:=Max(7,Rows);
   LeftCell:=EnsureRange(JInt(W,'self.x')-Columns div 2,0,32-Columns);TopCell:=EnsureRange(JInt(W,'self.y')-Rows div 2,0,32-Rows);
-  OX:=(Surface.Width-Columns*S) div 2;OY:=108;
+  OX:=(Width-Columns*S) div 2;OY:=108;
   View.OX:=OX;View.OY:=OY;View.S:=S;View.LeftCell:=LeftCell;View.TopCell:=TopCell;View.Columns:=Columns;View.Rows:=Rows;
   for Y:=TopCell to TopCell+Rows-1 do begin Row:=Map.Items[Y].AsString;Seen:=View.Explored[Y];if Length(Seen)<>32 then Seen:=StringOfChar(' ',32);
     for X:=LeftCell to LeftCell+Columns-1 do begin PX:=OX+(X-LeftCell)*S;PY:=OY+(Y-TopCell)*S;
@@ -132,7 +133,7 @@ begin
   end;
   Frame(C,Rect(OX-3,OY-3,OX+Columns*S+3,OY+Rows*S+3));
   // Overview map of every explored cell; the current view is brighter.
-  MX:=Surface.Width-116;MY:=10;
+  MX:=Width-116;MY:=10;
   for Y:=0 to 31 do begin Row:=Map.Items[Y].AsString;Seen:=View.Explored[Y];if Length(Seen)<>32 then Seen:=StringOfChar(' ',32);
     for X:=0 to 31 do begin
     if Row[X+1]='#' then C.Brush.Color:=$00404C50 else if Row[X+1]='.' then C.Brush.Color:=$00767C67
@@ -143,6 +144,6 @@ begin
   Log:=W.FindPath('log');C.Font.Name:='Tahoma';C.Font.Size:=9;C.Font.Color:=$009EAEBB;C.Brush.Style:=bsClear;
   for I:=0 to 3 do if Log.Count>I then C.TextOut(26,OY+Rows*S+8+I*16,Log.Items[Log.Count-1-I].AsString);
   C.Brush.Style:=bsSolid;
-  if not Snapshot.FindPath('lobby').AsBoolean then ActionBar(C,W,View,(Surface.Width-16*(Bar+4)) div 2,Surface.Height-Bar-8,Bar);
+  if not Snapshot.FindPath('lobby').AsBoolean then ActionBar(C,W,View,(Width-16*(Bar+4)) div 2,Height-Bar-8,Bar);
 end;
 end.

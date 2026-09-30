@@ -2,7 +2,7 @@ unit Main;
 {$mode objfpc}{$H+}{$codepage utf8}
 interface
 uses Classes, SysUtils, Forms, Controls, Graphics, StdCtrls, ExtCtrls, Dialogs,
-  LCLType, LMessages, ComCtrls, fpjson, jsonparser, GameProtocol, GameTransport, GameTheme, GameData, GameRenderer, GameArt, TownWindow, NativeNetwork, FieldGuide;
+  LCLType, LMessages, ComCtrls, fpjson, jsonparser, GameProtocol, GameTransport, GameTheme, GameData, GameRenderer, GameArt, TownWindow, NativeNetwork, FieldGuide, URIParser;
 
 type
   TGameMap = class(TCustomControl)
@@ -245,6 +245,16 @@ begin
   end;
 end;
 
+{ Plain HTTP is allowed to loopback and to private LAN servers (old PCs on a home network). }
+function LanAddress(const Base:string):Boolean;
+var Host:string;Parts:TStringArray;Second:Integer;
+begin
+  Result:=False;if Copy(Base,1,7)<>'http://' then Exit;
+  Host:=ParseURI(Base).Host;Parts:=Host.Split('.');if Length(Parts)<>4 then Exit;
+  Second:=StrToIntDef(Parts[1],-1);
+  Result:=(Parts[0]='10') or ((Parts[0]='192') and (Parts[1]='168')) or ((Parts[0]='172') and (Second>=16) and (Second<=31));
+end;
+
 function OutcomeText(const Outcome:string):string;
 begin
   case Outcome of
@@ -394,9 +404,9 @@ begin
   Base:=Trim(FServer.Text);
   // This prototype intentionally permits plain HTTP only on loopback.
   if not (SupportsNativeNetwork and (Copy(Base,1,8)='https://')) and
-    (Base<>'http://127.0.0.1:8080') and (Base<>'http://localhost:8080') and
+    (Base<>'http://127.0.0.1:8080') and (Base<>'http://localhost:8080') and not LanAddress(Base) and
     not (FSmoke and (Base='http://api:8000')) then begin
-    FStatus.Caption:='Используйте локальный сервер :8080 или HTTPS-сервер (Windows).'; Exit;
+    FStatus.Caption:='Используйте локальный сервер :8080, сервер в домашней сети (http://192.168.x.x:8080) или HTTPS-сервер.'; Exit;
   end;
   FBusy:=True; TRequestThread.Create(@Received,Base+'/api/v1/'+Path,FToken,Body,Method,Kind);
   FHeroes.Enabled:=False;
@@ -593,7 +603,7 @@ begin
     end else if Kind='ticket' then begin
       if FExpedition<>'' then begin
         if Copy(FServer.Text,1,8)='https://' then SocketUrl:=FServer.Text+'/ws'
-        else SocketUrl:='http://127.0.0.1:8082';
+        else SocketUrl:='http://'+ParseURI(FServer.Text).Host+':8082';
         FreeAndNil(FWorld);FStreamSeen:=False;FWorld:=TWorldConnection.Create(SocketUrl,JStr(D,'ticket'),@WorldMessage);
       end;
     end else if Kind='expedition' then begin
@@ -642,7 +652,7 @@ begin
       FMap.Invalidate;
       if FSmoke then begin
         Inc(FSmokePolls);
-        if FSmokeMoveSent and (W.FindPath('self.x').AsInteger=FSmokeStartX+1) and (not SupportsNativeNetwork or FStreamSeen) then begin
+        if FSmokeMoveSent and (W.FindPath('self.x').AsInteger=FSmokeStartX+1) and (not SupportsWorldStream or FStreamSeen) then begin
           SmokeResult('PASCAL_SMOKE_OK town=true native_ws='+BoolToStr(FStreamSeen,True)+' equipment=true chat=true start_queued=true keyboard=east queued_during_poll=true x='+W.FindPath('self.x').AsString,False);
         end else if FSmokePolls>40 then begin
           SmokeResult('PASCAL_SMOKE_FAILED keyboard movement not confirmed; lobby='+JStr(FSnapshot,'lobby')+
@@ -703,7 +713,7 @@ begin
   if (FWorld<>nil) and ((FExpedition='') or FWorld.Finished) then begin
     FreeAndNil(FWorld);FStreamSnapshot:='';FStreamSeen:=False;FWsInFlight:=False;
   end;
-  if SupportsNativeNetwork and (FExpedition<>'') and (FWorld=nil) and (GetTickCount64>=FReconnectAt) then begin
+  if SupportsWorldStream and (FExpedition<>'') and (FWorld=nil) and (GetTickCount64>=FReconnectAt) then begin
     D:=TJSONObject.Create(['character_id',FHero,'expedition_id',FExpedition]);
     try Send('POST','world/tickets',D.AsJSON,'ticket');finally D.Free;end;Exit;
   end;
@@ -821,6 +831,6 @@ end;
 procedure TGameForm.Draw(Sender:TObject);
 begin
   FView.Hero:=FHero;FView.Expedition:=FExpedition;FView.Target:=FTarget;FView.Sheet:=FSheet;FView.EstTick:=EstimatedTick;
-  RenderMap(FMap,FSnapshot,FView);
+  RenderMap(FMap.Canvas,FMap.Width,FMap.Height,FSnapshot,FView);
 end;
 end.

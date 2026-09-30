@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <ProjectOptions>
+    <Version Value="12"/>
+    <General><MainUnit Value="0"/><Title Value="Grim Hollow screenshots"/><UseAppBundle Value="False"/><ResourceType Value="res"/></General>
+    <RequiredPackages Count="1"><Item1><PackageName Value="LCL"/></Item1></RequiredPackages>
+    <Units Count="1"><Unit0><Filename Value="Screenshots.lpr"/><IsPartOfProject Value="True"/></Unit0></Units>
+  </ProjectOptions>
+  <CompilerOptions>
+    <Version Value="11"/>
+    <Target><Filename Value="../../build/tools/screenshots"/></Target>
+    <SearchPaths><OtherUnitFiles Value="../../apps/client/src;../../packages/protocol-pascal/src"/><UnitOutputDirectory Value="../../build/tools/lib/$(TargetCPU)-$(TargetOS)"/></SearchPaths>
+    <Parsing><SyntaxOptions><SyntaxMode Value="ObjFPC"/></SyntaxOptions></Parsing>
+  </CompilerOptions>
+</CONFIG>
