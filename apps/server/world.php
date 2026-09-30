@@ -93,6 +93,16 @@ $worker->onMessage = function ($c, $raw) use (&$clients, $world, $worker) {
             }
         }
         $c->send(json_encode($world->command($session['expedition_id'], $session['character_id'], $m['command_id'], $m['payload'])));
+        // Push the post-command state now instead of waiting for the next 100 ms tick.
+        try {
+            $view = $world->snapshot($session['expedition_id'], $session['character_id'], false);
+            if (($session['revision'] ?? null) !== $view['revision']) {
+                $c->send(json_encode($view));
+                $session['revision'] = $view['revision'];
+            }
+        } catch (Throwable $e) {
+            report($e);
+        }
     } catch (Throwable $e) {
         $c->send(json_encode(['v' => 1, 'type' => 'error', 'code' => 'request_rejected']));
         if (! ($clients[$c->id]['authenticated'] ?? false)) {

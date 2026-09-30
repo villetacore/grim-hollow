@@ -15,6 +15,7 @@ type
     procedure Execute;override;
   public
     constructor Create(const Url,Ticket:string;Callback:TWorldMessage);
+    function SendText(const Payload:RawByteString):Boolean;
     procedure Stop;
     destructor Destroy;override;
   end;
@@ -26,7 +27,21 @@ uses Windows,WinHttp,URIParser;
 function HttpTimeouts(H:HINTERNET;ResolveMS,ConnectMS,SendMS,ReceiveMS:Integer):LongBool;stdcall;external 'winhttp.dll' name 'WinHttpSetTimeouts';
 procedure Check(OK:Boolean);
 begin if not OK then raise Exception.Create('Windows network error '+IntToStr(GetLastError));end;
-procedure OpenRequest(const Url,Method:string;Upgrade:Boolean;out Session,Connection,Request:HINTERNET);
+var SharedSession:HINTERNET=nil;SharedLock:TRTLCriticalSection;
+// One WinHTTP session for all API calls: WinHTTP keeps TCP/TLS connections alive per session,
+// so only the first request to a server pays the handshake instead of every request.
+function GetSharedSession:HINTERNET;
+begin
+  EnterCriticalSection(SharedLock);
+  try
+    if SharedSession=nil then begin
+      SharedSession:=WinHttpOpen('GrimHollow/0.3',WINHTTP_ACCESS_TYPE_NO_PROXY,nil,nil,0);Check(SharedSession<>nil);
+      Check(HttpTimeouts(SharedSession,3000,3000,3000,3000));
+    end;
+    Result:=SharedSession;
+  finally LeaveCriticalSection(SharedLock);end;
+end;
+procedure OpenRequest(const Url,Method:string;Upgrade,Shared:Boolean;out Session,Connection,Request:HINTERNET);
 var U:TURI;Port:Word;Flags,Policy:DWORD;Host,Path,Verb:UnicodeString;
 begin
   Session:=nil;Connection:=nil;Request:=nil;U:=ParseURI(Url,False);
@@ -34,8 +49,11 @@ begin
   Flags:=0;Port:=U.Port;if U.Protocol='https' then begin Flags:=WINHTTP_FLAG_SECURE;if Port=0 then Port:=443;end
   else if U.Protocol='http' then begin if Port=0 then Port:=80;end else raise Exception.Create('Unsupported URL protocol');
   Host:=UTF8Decode(U.Host);Path:=UTF8Decode(U.Path+U.Document);if Path='' then Path:='/';if U.Params<>'' then Path:=Path+'?'+UTF8Decode(U.Params);Verb:=UTF8Decode(Method);
-  Session:=WinHttpOpen('GrimHollow/0.3',WINHTTP_ACCESS_TYPE_NO_PROXY,nil,nil,0);Check(Session<>nil);
-  Check(HttpTimeouts(Session,3000,3000,3000,3000));
+  if Shared then Session:=GetSharedSession
+  else begin
+    Session:=WinHttpOpen('GrimHollow/0.3',WINHTTP_ACCESS_TYPE_NO_PROXY,nil,nil,0);Check(Session<>nil);
+    Check(HttpTimeouts(Session,3000,3000,3000,3000));
+  end;
   Connection:=WinHttpConnect(Session,PWideChar(Host),Port,0);Check(Connection<>nil);
   Request:=WinHttpOpenRequest(Connection,PWideChar(Verb),PWideChar(Path),nil,nil,nil,Flags);Check(Request<>nil);
   Policy:=WINHTTP_OPTION_REDIRECT_POLICY_NEVER;Check(WinHttpSetOption(Request,WINHTTP_OPTION_REDIRECT_POLICY,@Policy,SizeOf(Policy)));
@@ -47,7 +65,7 @@ var Session,Connection,Request:HINTERNET;Headers:UnicodeString;Buffer:array[0..8
 begin
   Session:=nil;Connection:=nil;Request:=nil;Result:='';
   try
-    OpenRequest(Url,Method,False,Session,Connection,Request);
+    OpenRequest(Url,Method,False,True,Session,Connection,Request);
     Headers:='Accept: application/json'+#13#10+'Content-Type: application/json'+#13#10;
     if Token<>'' then Headers:=Headers+'Authorization: Bearer '+UTF8Decode(Token)+#13#10;
     Check(WinHttpSendRequest(Request,PWideChar(Headers),Length(Headers),Pointer(Body),Length(Body),Length(Body),0));
@@ -58,7 +76,7 @@ begin
       if Length(Result)+N>2097152 then raise Exception.Create('Response too large');
       SetString(Part,PAnsiChar(@Buffer[0]),N);Result:=Result+Part;
     until N=0;
-  finally if Request<>nil then WinHttpCloseHandle(Request);if Connection<>nil then WinHttpCloseHandle(Connection);if Session<>nil then WinHttpCloseHandle(Session);end;
+  finally if Request<>nil then WinHttpCloseHandle(Request);if Connection<>nil then WinHttpCloseHandle(Connection);end;
 end;
 {$ELSE}
 function NativeHttps(const Url,Token,Body,Method:string;out Status:Integer):string;
@@ -70,6 +88,19 @@ constructor TWorldConnection.Create(const Url,Ticket:string;Callback:TWorldMessa
 begin inherited Create(True);FUrl:=Url;FTicket:=Ticket;FCallback:=Callback;InitCriticalSection(FLock);Start;end;
 procedure TWorldConnection.Deliver;
 begin if not Terminated then FCallback(FMessage,FError);end;
+// Called from the UI thread while Execute blocks in receive: WinHTTP allows one send and one
+// receive in flight at a time, and FLock serialises this send with the keep-alive ping.
+function TWorldConnection.SendText(const Payload:RawByteString):Boolean;
+begin
+  Result:=False;
+  {$IFDEF WINDOWS}
+  EnterCriticalSection(FLock);
+  try
+    if (FSocket<>nil) and not Terminated then
+      Result:=WinHttpWebSocketSend(FSocket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload))=0;
+  finally LeaveCriticalSection(FLock);end;
+  {$ENDIF}
+end;
 procedure TWorldConnection.Stop;
 var H:Pointer;
 begin
@@ -88,7 +119,7 @@ begin
   Session:=nil;Connection:=nil;Request:=nil;Socket:=nil;
   try
     try
-      OpenRequest(FUrl,'GET',True,Session,Connection,Request);
+      OpenRequest(FUrl,'GET',True,False,Session,Connection,Request);
       Check(WinHttpSendRequest(Request,nil,0,nil,0,0,0));Check(WinHttpReceiveResponse(Request,nil));
       Socket:=WinHttpWebSocketCompleteUpgrade(Request,0);Check(Socket<>nil);
       EnterCriticalSection(FLock);FSocket:=Socket;LeaveCriticalSection(FLock);
@@ -98,7 +129,10 @@ begin
       LastPing:=GetTickCount64;FMessage:='';
       while not Terminated do begin
         if GetTickCount64-LastPing>5000 then begin
-          Payload:='{"v":1,"type":"ping"}';Code:=WinHttpWebSocketSend(Socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload));
+          Payload:='{"v":1,"type":"ping"}';
+          EnterCriticalSection(FLock);
+          try Code:=WinHttpWebSocketSend(Socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload));
+          finally LeaveCriticalSection(FLock);end;
           if Code<>0 then raise Exception.Create('WebSocket ping failed');LastPing:=GetTickCount64;
         end;
         N:=0;Code:=WinHttpWebSocketReceive(Socket,@Buffer[0],SizeOf(Buffer),@N,@BufferType);
@@ -119,4 +153,11 @@ begin
   end;
   {$ENDIF}
 end;
+{$IFDEF WINDOWS}
+initialization
+  InitCriticalSection(SharedLock);
+finalization
+  if SharedSession<>nil then WinHttpCloseHandle(SharedSession);
+  DoneCriticalSection(SharedLock);
+{$ENDIF}
 end.

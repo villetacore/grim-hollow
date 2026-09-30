@@ -27,6 +27,7 @@ type
     FChatCursor:string;
     FChatRequestContext,FChatSentBody:string;
     FPollCounter:Integer;
+    FAwaitingStream:QWord;
     FHealth,FMana,FExperience:TProgressBar;
     FServer, FEmail, FPassword, FName, FCode: TEdit;
     FStatus, FStats, FHelp: TLabel;
@@ -45,6 +46,9 @@ type
     FStreamSeen:Boolean;
     FReconnectAt:QWord;
     FSessionUntil:QWord;
+    FWsInFlight:Boolean;
+    FWsSentAt:QWord;
+    function StreamLive:Boolean;
     procedure WorldMessage(const Payload,ErrorText:string);
     procedure FocusGame;
     procedure ResizeLayout(Sender:TObject);
@@ -102,16 +106,30 @@ end;
 destructor TGameForm.Destroy;
 begin FWorld.Free;FSnapshot.Free; FSheet.Free; FCharacters.Free; inherited Destroy; end;
 
+function TGameForm.StreamLive:Boolean;
+begin Result:=not FSmoke and FStreamSeen and (FWorld<>nil) and not FWorld.Finished; end;
+
 procedure TGameForm.WorldMessage(const Payload,ErrorText:string);
-var D:TJSONData;
+var D:TJSONData;Fresh,Kind:string;Rejected:Boolean;
 begin
-  if ErrorText<>'' then begin FReconnectAt:=GetTickCount64+3000;Exit;end;
-  D:=nil;
-  try D:=GetJSON(Payload);
-    if (JStr(D,'type')='snapshot') and (JStr(D,'instance_id')=FExpedition) then begin
+  if ErrorText<>'' then begin FReconnectAt:=GetTickCount64+3000;FWsInFlight:=False;Exit;end;
+  D:=nil;Rejected:=False;
+  try D:=GetJSON(Payload);Kind:=JStr(D,'type');
+    if (Kind='snapshot') and (JStr(D,'instance_id')=FExpedition) then begin
       FStreamSnapshot:=Payload;FStreamSeen:=True;
-    end;
+    end else if (Kind='command_result') and FWsInFlight then begin
+      FWsInFlight:=False;
+      if JStr(D,'status')='rejected' then begin FStatus.Caption:=FriendlyError(JStr(D,'reason'));Rejected:=True;end
+      else begin FStatus.Caption:='Действие подтверждено сервером.';FAwaitingStream:=GetTickCount64;end;
+    end else if (Kind='error') and FWsInFlight then begin
+      FWsInFlight:=False;FPendingAction:='';FStatus.Caption:='Сервер отклонил действие.';
+    end else if Kind='server_paused' then
+      FStatus.Caption:='Мир на сервере временно приостановлен. Подождите…';
   finally D.Free;end;
+  // Apply the pushed state immediately instead of waiting for the next poll-timer tick.
+  if not FSmoke and not FBusy and (FStreamSnapshot<>'') then begin
+    Fresh:=FStreamSnapshot;FStreamSnapshot:='';Received('poll',Fresh,'');
+  end else if Rejected then DispatchPending;
 end;
 
 procedure TGameForm.Shown(Sender: TObject);
@@ -178,7 +196,7 @@ end;
 procedure TGameForm.DispatchPending;
 var ButtonName, ActionName, Direction: string; W: TJSONData;
 begin
-  if FBusy then Exit;
+  if FBusy or FWsInFlight then Exit;
   if FPendingButton<>'' then begin
     ButtonName:=FPendingButton; FPendingButton:='';
     ButtonClick(FindComponent(ButtonName)); Exit;
@@ -299,9 +317,10 @@ begin
 end;
 
 procedure TGameForm.Received(const Kind, Response, Error: string);
-var D, Items, W: TJSONData; I, Selected:Integer; SocketUrl:string;
+var D, Items, W: TJSONData; I, Selected:Integer; SocketUrl, Fresh:string;
 begin
   FBusy:=False;
+  if Kind='poll' then FAwaitingStream:=0;
   FHeroes.Enabled:=FExpedition='';
   if Error<>'' then begin
     FPendingAction:=''; FPendingButton:='';
@@ -331,7 +350,7 @@ begin
     D:=GetJSON(Response);
     if Kind='refresh' then begin
       FToken:=JStr(D,'access_token');FSessionUntil:=GetTickCount64+QWord(JInt(D,'expires_in',28800))*1000;
-      FreeAndNil(FWorld);FStreamSeen:=False;FStreamSnapshot:='';
+      FreeAndNil(FWorld);FStreamSeen:=False;FStreamSnapshot:='';FWsInFlight:=False;
     end else if Kind='auth' then begin
       FPendingAction:=''; FPendingButton:='';
       FToken:=D.FindPath('access_token').AsString; FPassword.Clear;
@@ -463,20 +482,30 @@ begin
     if FSmoke then SmokeResult('PASCAL_SMOKE_FAILED '+E.Message,True);
   end; end;
   D.Free;
-  if (Kind='command') and (FExpedition<>'') and not FBusy then
-    Send('GET','expeditions/'+FExpedition+'?character_id='+FHero,'','poll')
-  else DispatchPending;
+  if (Kind='command') and (FExpedition<>'') and not FBusy then begin
+    if not FSmoke and FStreamSeen and (FWorld<>nil) and not FWorld.Finished then begin
+      // The world stream pushes the post-command state within one tick, so a second HTTPS
+      // round trip is unnecessary. Wait for it (Poll falls back to HTTP if it does not arrive).
+      if FStreamSnapshot<>'' then begin Fresh:=FStreamSnapshot;FStreamSnapshot:='';Received('poll',Fresh,'');end
+      else FAwaitingStream:=GetTickCount64;
+    end else Send('GET','expeditions/'+FExpedition+'?character_id='+FHero,'','poll');
+  end else DispatchPending;
 end;
 
 procedure TGameForm.Poll(Sender: TObject);
 var D:TJSONObject;Payload:string;
 begin
   if FBusy then Exit;
+  // A WebSocket command whose result never arrived must not block input: drop the flag and
+  // let the HTTP fallback below refresh the state.
+  if FWsInFlight and (GetTickCount64-FWsSentAt>3000) then begin
+    FWsInFlight:=False;FAwaitingStream:=GetTickCount64-2000;
+  end;
   if (FToken<>'') and (FSessionUntil>0) and (GetTickCount64+60000>=FSessionUntil) then begin
     Send('POST','auth/refresh','{}','refresh');Exit;
   end;
   if (FWorld<>nil) and ((FExpedition='') or FWorld.Finished) then begin
-    FreeAndNil(FWorld);FStreamSnapshot:='';FStreamSeen:=False;
+    FreeAndNil(FWorld);FStreamSnapshot:='';FStreamSeen:=False;FWsInFlight:=False;
   end;
   if SupportsNativeNetwork and (FExpedition<>'') and (FWorld=nil) and (GetTickCount64>=FReconnectAt) then begin
     D:=TJSONObject.Create(['character_id',FHero,'expedition_id',FExpedition]);
@@ -490,7 +519,8 @@ begin
   if not FSmoke and (FHero<>'') and (FPollCounter mod 10=0) then begin ReadChat;if FBusy then Exit;end;
   if FSmoke and (FToken='') then ButtonClick(FindComponent('RegisterButton'))
   else if FExpedition<>'' then begin
-    if not FSmoke and FStreamSeen and (FWorld<>nil) and not FWorld.Finished then Exit;
+    if not FSmoke and FStreamSeen and (FWorld<>nil) and not FWorld.Finished and
+      not ((FAwaitingStream>0) and (GetTickCount64-FAwaitingStream>1000)) then Exit;
     Send('GET','expeditions/'+FExpedition+'?character_id='+FHero,'','poll');
     if FSmoke and not FSmokeStartQueued and (FSnapshot<>nil) and FSnapshot.FindPath('lobby').AsBoolean then begin
       FSmokeStartQueued:=True; ButtonClick(FindComponent('StartButton'));
@@ -507,7 +537,7 @@ begin
 end;
 
 procedure TGameForm.Action(const ActionName, Direction: string);
-var D, P: TJSONObject; W, Enemies, E: TJSONData; I, X, Y, Distance, BestDistance: Integer; Target: string;
+var D, P: TJSONObject; W, Enemies, E: TJSONData; I, X, Y, Distance, BestDistance: Integer; Target, CommandId: string; Sent: Boolean;
 begin
   if FSmoke then Inc(FSmokeActions);
   if (FExpedition='') or (FSnapshot=nil) then Exit;
@@ -515,7 +545,7 @@ begin
     FStatus.Caption:='Сначала нажмите «Начать» — сейчас группа ещё в подготовке.'; Exit;
   end;
   W:=FSnapshot.FindPath('world');
-  if FBusy or (StrToInt64(W.FindPath('tick').AsString)<W.FindPath('self.ready_at').AsInt64) then begin
+  if FBusy or FWsInFlight or (StrToInt64(W.FindPath('tick').AsString)<W.FindPath('self.ready_at').AsInt64) then begin
     FPendingAction:=ActionName; FPendingDirection:=Direction; Exit;
   end;
   P:=TJSONObject.Create(['action',ActionName]);
@@ -561,7 +591,15 @@ begin
     if Target='' then begin P.Free; FStatus.Caption:='Нет противника в радиусе атаки.'; Exit; end;
     P.Add('target_id',Target);
   end;
-  D:=TJSONObject.Create(['character_id',FHero,'command_id',NewCommandId]); D.Add('payload',P);
+  CommandId:=NewCommandId;
+  // Prefer the already open world WebSocket: no HTTP request, the result and the new state
+  // arrive on the same connection. HTTPS stays as the fallback when the stream is not live.
+  if StreamLive then begin
+    D:=TJSONObject.Create(['v',1,'type','command','command_id',CommandId]); D.Add('payload',P.Clone);
+    try Sent:=FWorld.SendText(D.AsJSON); finally D.Free; end;
+    if Sent then begin P.Free; FWsInFlight:=True; FWsSentAt:=GetTickCount64; Exit; end;
+  end;
+  D:=TJSONObject.Create(['character_id',FHero,'command_id',CommandId]); D.Add('payload',P);
   try Send('POST','expeditions/'+FExpedition+'/commands',D.AsJSON,'command'); finally D.Free; end;
 end;
 
