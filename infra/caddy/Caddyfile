@@ -1,0 +1,14 @@
+{$GAME_DOMAIN} {
+    encode zstd gzip
+    handle /ws {
+        reverse_proxy world:8081
+    }
+    handle {
+        reverse_proxy web:80
+    }
+    header {
+        X-Content-Type-Options nosniff
+        Referrer-Policy same-origin
+        X-Frame-Options DENY
+    }
+}

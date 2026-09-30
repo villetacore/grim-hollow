@@ -1,0 +1,139 @@
+name: Build and test
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: testing-only
+          MYSQL_DATABASE: grim_hollow_test
+        ports: ['3306:3306']
+        options: --health-cmd="mysqladmin ping --silent" --health-interval=5s --health-timeout=5s --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate source and version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            python tools/release.py check --tag "$GITHUB_REF_NAME"
+          else
+            python tools/release.py check
+          fi
+          python -m unittest discover -s tests/packaging
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo_mysql, mbstring, dom, xml, xmlwriter
+          coverage: none
+      - run: composer validate --no-check-publish && composer install --no-interaction --prefer-dist
+        working-directory: apps/server
+      - run: php vendor/bin/phpunit
+        working-directory: apps/server
+        env:
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_DATABASE: grim_hollow_test
+          DB_USERNAME: root
+          DB_PASSWORD: testing-only
+      - name: Build production server
+        run: docker build -f infra/docker/server/Production.Dockerfile -t grim-hollow-server:ci .
+      - name: Verify FPM configuration
+        run: docker run --rm grim-hollow-server:ci php-fpm -t
+      - name: Package source and server configuration
+        run: |
+          python tools/release.py source
+          python tools/release.py server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-server-source
+          path: |
+            dist/releases/*-source.zip
+            dist/releases/*-server.tar.gz
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: gcarreno/setup-lazarus@v3
+        with:
+          lazarus-version: '4.4'
+          with-cache: false
+      - name: Compile and package Windows client
+        shell: pwsh
+        run: ./tools/package-client.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/releases/*-windows-x64.zip
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Start isolated test server
+        run: |
+          sh tools/setup.sh
+          for n in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:8080/up >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+      - run: docker build -f infra/docker/client/Dockerfile -t grim-hollow-client:ci .
+      - name: Native GUI smoke and network tests
+        run: |
+          mkdir -p build/gui
+          chmod 777 build/gui
+          docker run --rm --network grim-hollow_default --mount "type=bind,source=$PWD/build/gui,target=/artifacts" grim-hollow-client:ci timeout 40s xvfb-run -a -s '-screen 0 1400x1000x24' /game/build/client/linux/grim-hollow --smoke
+          grep -q '^PASCAL_SMOKE_OK' build/gui/result.txt
+          node tests/e2e/smoke.mjs
+          node tests/e2e/rpg.mjs
+          node tests/e2e/gameplay.mjs
+          node tests/e2e/recovery.mjs before
+          docker compose --env-file infra/compose/.env -f infra/compose/dev.yaml restart world
+          node tests/e2e/recovery.mjs after
+      - name: Export and package Linux client
+        run: |
+          mkdir -p build/client/linux
+          cid=$(docker create grim-hollow-client:ci)
+          trap 'docker rm "$cid" >/dev/null' EXIT
+          docker cp "$cid:/game/build/client/linux/grim-hollow" build/client/linux/grim-hollow
+          python tools/release.py client --platform linux-x64 --binary build/client/linux/grim-hollow
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: dist/releases/*-linux-x64.tar.gz
+          if-no-files-found: error
+      - name: Diagnostics
+        if: failure()
+        run: docker compose --env-file infra/compose/.env -f infra/compose/dev.yaml logs --tail=100
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-gui-results
+          path: build/gui/
+          if-no-files-found: ignore
+      - name: Stop test stack
+        if: always()
+        run: docker compose --env-file infra/compose/.env -f infra/compose/dev.yaml down

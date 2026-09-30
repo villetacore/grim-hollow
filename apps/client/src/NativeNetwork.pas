@@ -1,0 +1,122 @@
+unit NativeNetwork;
+{$mode objfpc}{$H+}
+interface
+uses Classes,SysUtils;
+type
+  TWorldMessage=procedure(const Payload,ErrorText:string) of object;
+  TWorldConnection=class(TThread)
+  private
+    FUrl,FTicket,FMessage,FError:string;
+    FCallback:TWorldMessage;
+    FSocket:Pointer;
+    FLock:TRTLCriticalSection;
+    procedure Deliver;
+  protected
+    procedure Execute;override;
+  public
+    constructor Create(const Url,Ticket:string;Callback:TWorldMessage);
+    procedure Stop;
+    destructor Destroy;override;
+  end;
+function NativeHttps(const Url,Token,Body,Method:string;out Status:Integer):string;
+function SupportsNativeNetwork:Boolean;
+implementation
+{$IFDEF WINDOWS}
+uses Windows,WinHttp,URIParser;
+function HttpTimeouts(H:HINTERNET;ResolveMS,ConnectMS,SendMS,ReceiveMS:Integer):LongBool;stdcall;external 'winhttp.dll' name 'WinHttpSetTimeouts';
+procedure Check(OK:Boolean);
+begin if not OK then raise Exception.Create('Windows network error '+IntToStr(GetLastError));end;
+procedure OpenRequest(const Url,Method:string;Upgrade:Boolean;out Session,Connection,Request:HINTERNET);
+var U:TURI;Port:Word;Flags,Policy:DWORD;Host,Path,Verb:UnicodeString;
+begin
+  Session:=nil;Connection:=nil;Request:=nil;U:=ParseURI(Url,False);
+  if (U.Host='') or (U.Username<>'') or (U.Password<>'') then raise Exception.Create('Invalid server URL');
+  Flags:=0;Port:=U.Port;if U.Protocol='https' then begin Flags:=WINHTTP_FLAG_SECURE;if Port=0 then Port:=443;end
+  else if U.Protocol='http' then begin if Port=0 then Port:=80;end else raise Exception.Create('Unsupported URL protocol');
+  Host:=UTF8Decode(U.Host);Path:=UTF8Decode(U.Path+U.Document);if Path='' then Path:='/';if U.Params<>'' then Path:=Path+'?'+UTF8Decode(U.Params);Verb:=UTF8Decode(Method);
+  Session:=WinHttpOpen('GrimHollow/0.3',WINHTTP_ACCESS_TYPE_NO_PROXY,nil,nil,0);Check(Session<>nil);
+  Check(HttpTimeouts(Session,3000,3000,3000,3000));
+  Connection:=WinHttpConnect(Session,PWideChar(Host),Port,0);Check(Connection<>nil);
+  Request:=WinHttpOpenRequest(Connection,PWideChar(Verb),PWideChar(Path),nil,nil,nil,Flags);Check(Request<>nil);
+  Policy:=WINHTTP_OPTION_REDIRECT_POLICY_NEVER;Check(WinHttpSetOption(Request,WINHTTP_OPTION_REDIRECT_POLICY,@Policy,SizeOf(Policy)));
+  // Default Windows chain, expiry and hostname checks stay enabled. No ignore-certificate flags.
+  if Upgrade then Check(WinHttpSetOption(Request,WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,nil,0));
+end;
+function NativeHttps(const Url,Token,Body,Method:string;out Status:Integer):string;
+var Session,Connection,Request:HINTERNET;Headers:UnicodeString;Buffer:array[0..8191] of Byte;N,Code,Size:DWORD;Part:RawByteString;
+begin
+  Session:=nil;Connection:=nil;Request:=nil;Result:='';
+  try
+    OpenRequest(Url,Method,False,Session,Connection,Request);
+    Headers:='Accept: application/json'+#13#10+'Content-Type: application/json'+#13#10;
+    if Token<>'' then Headers:=Headers+'Authorization: Bearer '+UTF8Decode(Token)+#13#10;
+    Check(WinHttpSendRequest(Request,PWideChar(Headers),Length(Headers),Pointer(Body),Length(Body),Length(Body),0));
+    Check(WinHttpReceiveResponse(Request,nil));Size:=SizeOf(Code);
+    Check(WinHttpQueryHeaders(Request,WINHTTP_QUERY_STATUS_CODE or WINHTTP_QUERY_FLAG_NUMBER,nil,@Code,@Size,nil));Status:=Code;
+    repeat
+      N:=0;Check(WinHttpReadData(Request,@Buffer[0],SizeOf(Buffer),@N));
+      if Length(Result)+N>2097152 then raise Exception.Create('Response too large');
+      SetString(Part,PAnsiChar(@Buffer[0]),N);Result:=Result+Part;
+    until N=0;
+  finally if Request<>nil then WinHttpCloseHandle(Request);if Connection<>nil then WinHttpCloseHandle(Connection);if Session<>nil then WinHttpCloseHandle(Session);end;
+end;
+{$ELSE}
+function NativeHttps(const Url,Token,Body,Method:string;out Status:Integer):string;
+begin Status:=0;Result:='';raise Exception.Create('This Linux build supports local HTTP; native TLS adapter is not included.');end;
+{$ENDIF}
+function SupportsNativeNetwork:Boolean;
+begin {$IFDEF WINDOWS}Result:=True;{$ELSE}Result:=False;{$ENDIF}end;
+constructor TWorldConnection.Create(const Url,Ticket:string;Callback:TWorldMessage);
+begin inherited Create(True);FUrl:=Url;FTicket:=Ticket;FCallback:=Callback;InitCriticalSection(FLock);Start;end;
+procedure TWorldConnection.Deliver;
+begin if not Terminated then FCallback(FMessage,FError);end;
+procedure TWorldConnection.Stop;
+var H:Pointer;
+begin
+  Terminate;EnterCriticalSection(FLock);H:=FSocket;FSocket:=nil;LeaveCriticalSection(FLock);
+  {$IFDEF WINDOWS}if H<>nil then WinHttpCloseHandle(H);{$ENDIF}
+end;
+destructor TWorldConnection.Destroy;
+begin Stop;WaitFor;DoneCriticalSection(FLock);inherited Destroy;end;
+procedure TWorldConnection.Execute;
+{$IFDEF WINDOWS}
+var Session,Connection,Request,Socket:HINTERNET;Buffer:array[0..16383] of Byte;
+  Code,N:DWORD;BufferType:WINHTTP_WEB_SOCKET_BUFFER_TYPE;Part,Payload:RawByteString;LastPing:QWord;OwnHandle:Boolean;
+{$ENDIF}
+begin
+  {$IFDEF WINDOWS}
+  Session:=nil;Connection:=nil;Request:=nil;Socket:=nil;
+  try
+    try
+      OpenRequest(FUrl,'GET',True,Session,Connection,Request);
+      Check(WinHttpSendRequest(Request,nil,0,nil,0,0,0));Check(WinHttpReceiveResponse(Request,nil));
+      Socket:=WinHttpWebSocketCompleteUpgrade(Request,0);Check(Socket<>nil);
+      EnterCriticalSection(FLock);FSocket:=Socket;LeaveCriticalSection(FLock);
+      Payload:='{"v":1,"type":"hello","ticket":"'+FTicket+'"}';
+      Code:=WinHttpWebSocketSend(Socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload));
+      if Code<>0 then raise Exception.Create('WebSocket hello failed '+IntToStr(Code));
+      LastPing:=GetTickCount64;FMessage:='';
+      while not Terminated do begin
+        if GetTickCount64-LastPing>5000 then begin
+          Payload:='{"v":1,"type":"ping"}';Code:=WinHttpWebSocketSend(Socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload));
+          if Code<>0 then raise Exception.Create('WebSocket ping failed');LastPing:=GetTickCount64;
+        end;
+        N:=0;Code:=WinHttpWebSocketReceive(Socket,@Buffer[0],SizeOf(Buffer),@N,@BufferType);
+        if Terminated then Break;
+        if Code=12002 then Continue;
+        if Code<>0 then raise Exception.Create('WebSocket receive failed '+IntToStr(Code));
+        if BufferType=WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE then raise Exception.Create('WebSocket closed');
+        if not (BufferType in [WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE]) then raise Exception.Create('Invalid WebSocket frame');
+        if Length(FMessage)+N>2097152 then raise Exception.Create('WebSocket snapshot too large');
+        SetString(Part,PAnsiChar(@Buffer[0]),N);FMessage:=FMessage+Part;
+        if BufferType=WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE then begin Synchronize(@Deliver);FMessage:='';end;
+      end;
+    except on E:Exception do if not Terminated then begin FError:=E.Message;FMessage:='';Synchronize(@Deliver);end;end;
+  finally
+    EnterCriticalSection(FLock);OwnHandle:=FSocket<>nil;FSocket:=nil;LeaveCriticalSection(FLock);
+    if OwnHandle then WinHttpCloseHandle(Socket);
+    if Request<>nil then WinHttpCloseHandle(Request);if Connection<>nil then WinHttpCloseHandle(Connection);if Session<>nil then WinHttpCloseHandle(Session);
+  end;
+  {$ENDIF}
+end;
+end.

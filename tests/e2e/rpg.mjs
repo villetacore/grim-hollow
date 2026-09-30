@@ -1,0 +1,34 @@
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+const base=process.env.API_URL??'http://127.0.0.1:8080/api/v1';
+let token;
+async function api(path,body,status=200){
+  const r=await fetch(base+'/'+path,{method:body?'POST':'GET',headers:{Accept:'application/json','Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:body?JSON.stringify(body):undefined});
+  const data=await r.json();assert.equal(r.status,status,JSON.stringify(data));return data;
+}
+const suffix=randomUUID().slice(0,8);
+token=(await api('auth/register',{email:`rpg${suffix}@example.test`,password:randomUUID()},201)).access_token;
+const mage=await api('characters',{name:'Mage'+suffix,class_id:'arcanist'},201);
+const guard=await api('characters',{name:'Guard'+suffix},201);
+assert.equal((await api('characters')).items.length,2);
+let sheet=await api('characters/'+mage.id);assert.equal(sheet.items.length,4);assert.equal(sheet.stats.max_mana,100);
+const ring=sheet.items.find(x=>x.definition==='ember_ring');
+const equip={operation_id:randomUUID(),action:'equip',item_id:ring.id};
+sheet=await api(`characters/${mage.id}/manage`,equip);assert.equal(sheet.stats.power,8);
+await api(`characters/${mage.id}/manage`,equip);
+await api(`characters/${mage.id}/manage`,{operation_id:randomUUID(),action:'train',attribute:'strength'},409);
+const chat={character_id:mage.id,channel:'global',message_id:randomUUID(),body:'Привет из Пепельного предела!'};
+const posted=await api('chat',chat);assert.equal((await api('chat',chat)).id,posted.id);
+assert.ok((await api(`chat?character_id=${guard.id}&channel=global`)).items.some(x=>String(x.id)===posted.id));
+const exp=await api('expeditions',{character_id:mage.id});
+await api(`characters/${mage.id}/manage`,{operation_id:randomUUID(),action:'unequip',item_id:ring.id},409);
+await api(`expeditions/${exp.id}/start`,{character_id:mage.id});
+const state=await api(`expeditions/${exp.id}?character_id=${mage.id}`);assert.equal(state.world.self.power,8);
+const cast=await api(`expeditions/${exp.id}/commands`,{character_id:mage.id,command_id:randomUUID(),payload:{action:'cast',spell_id:'frost',target_id:'e0'}});
+assert.equal(cast.reason,'spell_locked');
+await api(`expeditions/${exp.id}/leave`,{character_id:mage.id});
+await api(`characters/${mage.id}/manage`,{operation_id:randomUUID(),action:'unequip',item_id:ring.id});
+const sale={operation_id:randomUUID(),action:'sell',item_id:ring.id};
+sheet=await api(`characters/${mage.id}/manage`,sale);assert.equal(sheet.gold,12);
+sheet=await api(`characters/${mage.id}/manage`,sale);assert.equal(sheet.gold,12);
+console.log('RPG_OK: multiple heroes, equipment, stats, idempotent sale/chat, expedition loadout, spell level gate');

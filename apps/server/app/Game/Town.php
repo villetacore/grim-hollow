@@ -1,0 +1,131 @@
+<?php
+declare(strict_types=1);
+namespace App\Game;
+use GrimHollow\Core\{Catalog,Canonical};
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
+
+final class Town
+{
+    public static function ledger(string $id,string $reason,int $gold,int $materials,string $reference): void {
+        DB::table('economy_ledger')->insert(['character_id'=>$id,'reason'=>$reason,'gold_delta'=>$gold,'materials_delta'=>$materials,'reference'=>$reference,'created_at'=>now()]);
+    }
+    public function overview(int $account,string $id): array {
+        $sheet=(new Characters)->sheet($account,$id);
+        $guild=DB::table('guild_members as m')->join('guilds as g','g.id','=','m.guild_id')->where('m.character_id',$id)->first(['g.id','g.name','g.leader_id']);
+        $members=$guild?DB::table('guild_members as m')->join('characters as c','c.id','=','m.character_id')->where('m.guild_id',$guild->id)->get(['c.id','c.name','c.class_id','c.campaign']):[];
+        $invites=DB::table('guild_invites as i')->join('guilds as g','g.id','=','i.guild_id')->where('i.character_id',$id)->get(['g.id','g.name']);
+        $market=DB::table('market_listings as l')->join('character_items as i','i.id','=','l.item_id')->join('characters as c','c.id','=','l.seller_id')
+            ->where('l.status','open')->orderByDesc('l.created_at')->limit(100)->get(['l.id','l.seller_id','l.price','c.name as seller','i.definition'])
+            ->map(fn($l)=>(array)$l+['name'=>Catalog::items()[$l->definition]['name']]);
+        $friends=DB::table('friendships')->where('sender_id',$account)->orWhere('receiver_id',$account)->get()->map(function($f)use($account){
+            $other=$f->sender_id===$account?$f->receiver_id:$f->sender_id;
+            return ['name'=>DB::table('characters')->where('user_id',$other)->orderBy('id')->value('name'),'accepted'=>(bool)$f->accepted,'incoming'=>$f->receiver_id===$account];
+        });
+        $talents=json_decode(DB::table('characters')->where('id',$id)->value('talents')??'{}',true);
+        return ['hero'=>$sheet,'market'=>$market,'talents'=>collect(Catalog::talents())->filter(fn($t)=>$t['class']===$sheet['class_id'])->map(fn($t,$key)=>$t+['rank'=>$talents[$key]??0]),
+            'talent_points'=>max(0,intdiv($sheet['level'],3)-array_sum($talents)),
+            'recipes'=>collect(Catalog::recipes())->map(fn($r,$key)=>$r+['name'=>Catalog::items()[$key]['name']]),
+            'guild'=>$guild,'members'=>$members,'invites'=>$invites,'friends'=>$friends,
+            'ledger'=>DB::table('economy_ledger')->where('character_id',$id)->orderByDesc('id')->limit(20)->get(['reason','gold_delta','materials_delta','created_at'])];
+    }
+    public function act(int $account,string $id,array $d): array {
+        DB::transaction(function()use($account,$id,$d){
+            $c=DB::table('characters')->where('id',$id)->where('user_id',$account)->lockForUpdate()->first();abort_unless($c,404,'character_not_found');
+            $hash=hash('sha256',Canonical::json($d));
+            $old=DB::table('character_operations')->where('character_id',$id)->where('operation_id',$d['operation_id'])->first();
+            if($old){abort_unless(hash_equals($old->payload_hash,$hash),409,'operation_id_reused');return;}
+            abort_if($c->active_expedition,409,'return_to_town_first');
+            $action=$d['action'];$ref=$d['operation_id'];
+            if($action==='salvage'||$action==='list') {
+                $item=DB::table('character_items')->where('id',$d['target']??'')->where('character_id',$id)->where('escrow',false)->first();
+                abort_unless($item,404,'item_not_found');abort_if($item->equipped_slot,409,'unequip_first');
+                if($action==='salvage') {
+                    $n=Catalog::items()[$item->definition]['level'];DB::table('character_items')->where('id',$item->id)->delete();
+                    DB::table('characters')->where('id',$id)->increment('materials',$n);self::ledger($id,'salvage',0,$n,$ref);
+                } else {
+                    abort_if($item->bound,409,'item_bound');$price=$d['price']??0;abort_unless($price>=1&&$price<=1000000,422,'invalid_price');
+                    DB::table('character_items')->where('id',$item->id)->update(['escrow'=>true]);
+                    DB::table('market_listings')->insert(['id'=>(string)Str::ulid(),'seller_id'=>$id,'item_id'=>$item->id,'price'=>$price,'created_at'=>now()]);
+                    self::ledger($id,'market_list',0,0,$ref);
+                }
+            } elseif($action==='buy'||$action==='cancel') {
+                $lot=DB::table('market_listings')->where('id',$d['target']??'')->lockForUpdate()->first();abort_unless($lot&&$lot->status==='open',409,'listing_unavailable');
+                if($action==='cancel') {
+                    abort_unless($lot->seller_id===$id,403,'owner_only');DB::table('character_items')->where('id',$lot->item_id)->update(['escrow'=>false]);
+                    DB::table('market_listings')->where('id',$lot->id)->update(['status'=>'cancelled']);self::ledger($id,'market_cancel',0,0,$lot->id);
+                } else {
+                    abort_if($lot->seller_id===$id,409,'own_listing');abort_unless($c->gold>=$lot->price,409,'not_enough_gold');
+                    DB::table('characters')->where('id',$lot->seller_id)->lockForUpdate()->first();
+                    $fee=max(1,intdiv($lot->price*5+99,100));
+                    DB::table('characters')->where('id',$id)->decrement('gold',$lot->price);
+                    DB::table('characters')->where('id',$lot->seller_id)->increment('gold',$lot->price-$fee);
+                    DB::table('character_items')->where('id',$lot->item_id)->update(['character_id'=>$id,'escrow'=>false]);
+                    DB::table('market_listings')->where('id',$lot->id)->update(['status'=>'sold','buyer_id'=>$id]);
+                    self::ledger($id,'market_buy',-$lot->price,0,$lot->id);self::ledger($lot->seller_id,'market_sale',$lot->price-$fee,0,$lot->id);
+                }
+            } elseif($action==='craft') {
+                $key=$d['target']??'';$recipe=Catalog::recipes()[$key]??null;abort_unless($recipe,422,'invalid_recipe');
+                abort_unless($c->gold>=$recipe['gold']&&$c->materials>=$recipe['materials'],409,'not_enough_resources');
+                DB::table('characters')->where('id',$id)->update(['gold'=>$c->gold-$recipe['gold'],'materials'=>$c->materials-$recipe['materials'],'craft_xp'=>$c->craft_xp+1]);
+                (new Characters)->grant($id,$key);self::ledger($id,'craft',-$recipe['gold'],-$recipe['materials'],$ref);
+            } elseif($action==='supply') {
+                abort_unless($c->gold>=8,409,'not_enough_gold');abort_if($c->supplies>=30,409,'supply_limit');
+                DB::table('characters')->where('id',$id)->update(['gold'=>$c->gold-8,'supplies'=>$c->supplies+1]);self::ledger($id,'supply',-8,0,$ref);
+            } elseif($action==='respec') {
+                DB::table('characters')->where('id',$id)->update(['strength'=>0,'vitality'=>0,'intellect'=>0,'talents'=>null]);
+            } elseif($action==='talent') {
+                $key=$d['target']??'';$talent=Catalog::talents()[$key]??null;abort_unless($talent&&$talent['class']===$c->class_id,422,'invalid_talent');
+                $ranks=json_decode($c->talents??'{}',true);$points=intdiv(Catalog::progression($c->xp)['level'],3)-array_sum($ranks);
+                abort_unless($points>0&&($ranks[$key]??0)<3,409,'talent_limit');$ranks[$key]=($ranks[$key]??0)+1;
+                DB::table('characters')->where('id',$id)->update(['talents'=>json_encode($ranks)]);
+            } elseif(str_starts_with($action,'guild_')) {
+                $this->guild($c,$d);
+            } elseif(str_starts_with($action,'friend_')) {
+                $this->friend($c,$d);
+            } else abort(422,'unknown_action');
+            DB::table('character_operations')->insert(['character_id'=>$id,'operation_id'=>$ref,'payload_hash'=>$hash]);
+        },5);
+        return $this->overview($account,$id);
+    }
+    private function guild(object $c,array $d): void {
+        $membership=DB::table('guild_members')->where('character_id',$c->id)->first();
+        if($d['action']==='guild_create') {
+            abort_if($membership,409,'already_in_guild');$name=trim($d['text']??'');
+            abort_unless(mb_strlen($name)>=3&&mb_strlen($name)<=32,422,'invalid_guild_name');abort_if(DB::table('guilds')->where('name',$name)->exists(),409,'guild_name_taken');
+            $id=(string)Str::ulid();DB::table('guilds')->insert(['id'=>$id,'name'=>$name,'leader_id'=>$c->id,'created_at'=>now()]);
+            DB::table('guild_members')->insert(['guild_id'=>$id,'character_id'=>$c->id,'created_at'=>now()]);return;
+        }
+        if($d['action']==='guild_accept') {
+            abort_if($membership,409,'already_in_guild');$id=$d['target']??'';
+            abort_unless(DB::table('guilds')->where('id',$id)->lockForUpdate()->first(),404,'guild_not_found');
+            abort_unless(DB::table('guild_invites')->where('guild_id',$id)->where('character_id',$c->id)->exists(),403,'invitation_required');
+            DB::table('guild_members')->insert(['guild_id'=>$id,'character_id'=>$c->id,'created_at'=>now()]);
+            DB::table('guild_invites')->where('character_id',$c->id)->delete();return;
+        }
+        abort_unless($membership,409,'guild_required');
+        $g=DB::table('guilds')->where('id',$membership->guild_id)->lockForUpdate()->first();
+        if($d['action']==='guild_leave') {
+            DB::table('guild_members')->where('character_id',$c->id)->delete();
+            if($g->leader_id===$c->id) {
+                $next=DB::table('guild_members')->where('guild_id',$g->id)->orderBy('created_at')->orderBy('character_id')->value('character_id');
+                if($next) DB::table('guilds')->where('id',$g->id)->update(['leader_id'=>$next]);else DB::table('guilds')->where('id',$g->id)->delete();
+            }return;
+        }
+        abort_unless($g->leader_id===$c->id,403,'leader_only');
+        $target=DB::table('characters')->where('name',$d['text']??'')->first();abort_unless($target,404,'character_not_found');
+        abort_if(DB::table('guild_members')->where('character_id',$target->id)->exists(),409,'already_in_guild');
+        DB::table('guild_invites')->insertOrIgnore(['guild_id'=>$g->id,'character_id'=>$target->id]);
+    }
+    private function friend(object $c,array $d): void {
+        $target=DB::table('characters')->where('name',$d['text']??'')->first();abort_unless($target,404,'character_not_found');
+        $a=$c->user_id;$b=$target->user_id;abort_if($a===$b,409,'same_account');
+        DB::table('users')->whereIn('id',[$a,$b])->orderBy('id')->lockForUpdate()->get();
+        $query=fn()=>DB::table('friendships')->where(fn($q)=>$q->where('sender_id',$a)->where('receiver_id',$b))->orWhere(fn($q)=>$q->where('sender_id',$b)->where('receiver_id',$a));
+        if($d['action']==='friend_remove') {$query()->delete();return;}
+        $old=$query()->first();
+        if($d['action']==='friend_accept') {
+            abort_unless($old&&$old->receiver_id===$a,409,'invitation_required');$query()->update(['accepted'=>true]);
+        } else { if(!$old) DB::table('friendships')->insert(['sender_id'=>$a,'receiver_id'=>$b]); }
+    }
+}

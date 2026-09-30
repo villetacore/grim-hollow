@@ -1,0 +1,70 @@
+name: grim-hollow
+x-app: &app
+  image: grim-hollow-server:dev
+  build:
+    context: ../..
+    dockerfile: infra/docker/server/Dockerfile
+  environment: &env
+    APP_ENV: local
+    APP_DEBUG: "false"
+    APP_KEY: ${APP_KEY:?Run tools/setup.ps1 first}
+    APP_URL: http://localhost:8080
+    DB_CONNECTION: mysql
+    DB_HOST: mysql
+    DB_DATABASE: grim_hollow
+    DB_USERNAME: grim
+    DB_PASSWORD: ${DB_PASSWORD:?Run tools/setup.ps1 first}
+    CACHE_STORE: database
+    SESSION_DRIVER: array
+    LOG_CHANNEL: stderr
+  init: true
+
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: grim_hollow
+      MYSQL_USER: grim
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Run tools/setup.ps1 first}
+    volumes: [mysql-data:/var/lib/mysql]
+    healthcheck:
+      test: [CMD-SHELL, 'mysqladmin ping -h 127.0.0.1 --silent']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  migrate:
+    <<: *app
+    command: [php, artisan, migrate, --force]
+    depends_on:
+      mysql: {condition: service_healthy}
+  api:
+    <<: *app
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["127.0.0.1:8080:8000"]
+    healthcheck:
+      test: [CMD, php, -r, "exit(@file_get_contents('http://127.0.0.1:8000/up') === false ? 1 : 0);"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  world:
+    <<: *app
+    command: [php, world.php, start]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    ports: ["127.0.0.1:${WORLD_PORT:-8082}:8081"]
+    restart: unless-stopped
+  test:
+    <<: *app
+    profiles: [test]
+    environment:
+      <<: *env
+      APP_ENV: testing
+      DB_DATABASE: grim_hollow_test
+    command: [php, vendor/bin/phpunit]
+    depends_on:
+      mysql: {condition: service_healthy}
+
+volumes:
+  mysql-data:

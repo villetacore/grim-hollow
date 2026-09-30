@@ -1,0 +1,49 @@
+# Local secrets and machine configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# PHP dependencies and generated Laravel state
+vendor/
+/apps/server/storage/logs/*
+/apps/server/storage/framework/cache/*
+/apps/server/storage/framework/sessions/*
+/apps/server/storage/framework/views/*
+
+# Pascal build output and IDE sessions
+*.o
+*.ppu
+*.or
+*.compiled
+*.lps
+*.bak
+/apps/client/lib/
+/apps/client/bin/
+
+# Generated distributions and local infrastructure data
+/dist/
+/build/
+/infra/data/
+/infra/backups/
+*.log
+.DS_Store
+Thumbs.db
+/.tools/
+/SHA256SUMS.txt
+/.agents/
+/.codex/
+**/__pycache__/
+*.pyc
+*.sql
+*.key
+*.pem
+auth.json
+**/.env.*
+!**/.env.example
+!**/.env.*.example
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+/apps/server/bootstrap/cache/*.php
+/apps/server/.phpunit.cache/
