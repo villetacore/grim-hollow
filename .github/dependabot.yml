@@ -12,3 +12,8 @@ updates:
     directory: /infra/docker/server
     schedule:
       interval: monthly
+    ignore:
+      # PHP 8.5 changes bundled extensions (opcache built in, dom needs lexbor);
+      # the images and ext list must be migrated deliberately, not by an auto bump.
+      - dependency-name: php
+        versions: ['>=8.5']
