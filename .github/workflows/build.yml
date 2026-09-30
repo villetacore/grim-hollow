@@ -52,7 +52,7 @@ jobs:
         run: |
           python tools/release.py source
           python tools/release.py server
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-server-source
           path: |
@@ -75,7 +75,7 @@ jobs:
       - name: Compile and package Windows client
         shell: pwsh
         run: ./tools/package-client.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-windows
           path: dist/releases/*-windows-x64.zip
@@ -120,7 +120,7 @@ jobs:
           trap 'docker rm "$cid" >/dev/null' EXIT
           docker cp "$cid:/game/build/client/linux/grim-hollow" build/client/linux/grim-hollow
           python tools/release.py client --platform linux-x64 --binary build/client/linux/grim-hollow
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-linux
           path: dist/releases/*-linux-x64.tar.gz
@@ -128,7 +128,7 @@ jobs:
       - name: Diagnostics
         if: failure()
         run: docker compose --env-file infra/compose/.env -f infra/compose/dev.yaml logs --tail=100
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: linux-gui-results
