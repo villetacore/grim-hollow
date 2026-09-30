@@ -1,4 +1,4 @@
-FROM php:8.5-cli-bookworm
+FROM php:8.4-cli-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends unzip libzip-dev libonig-dev libxml2-dev \
     && docker-php-ext-install pdo_mysql mbstring zip pcntl sockets dom xml xmlwriter \
     && rm -rf /var/lib/apt/lists/*
