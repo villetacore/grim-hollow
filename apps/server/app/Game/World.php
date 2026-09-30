@@ -38,17 +38,17 @@ final class World
         return $c;
     }
 
-    public function create(object $character,string $biome='mines'): object
+    public function create(object $character,string $biome='mines',string $mode='expedition'): object
     {
-        return DB::transaction(function () use ($character,$biome) {
+        return DB::transaction(function () use ($character,$biome,$mode) {
             $c = DB::table('characters')->where('id', $character->id)->lockForUpdate()->first();
             if ($c->active_expedition) {
                 return DB::table('expeditions')->where('id', $c->active_expedition)->first();
             }
             $id = (string) Str::ulid();
-            abort_unless(isset(Catalog::biomes()[$biome]) && $c->campaign>=Catalog::biomes()[$biome]['chapter'],409,'biome_locked');
+            abort_unless(isset(Catalog::biomes()[$biome]) && ($mode==='duel' || $c->campaign>=Catalog::biomes()[$biome]['chapter']),409,'biome_locked');
             $characters=new Characters; $characters->starter($c);
-            $state = Game::create(random_int(1, 2000000000), [$c->id => $characters->profile($c)],$biome);
+            $state = Game::create(random_int(1, 2000000000), [$c->id => $characters->profile($c)],$biome,$mode);
             DB::table('expeditions')->insert(['id' => $id, 'host_id' => $c->id, 'join_code' => strtoupper(Str::random(10)),
                 'status' => 'lobby', 'state' => json_encode($state), 'created_at' => now(), 'updated_at' => now()]);
             DB::table('expedition_members')->insert(['expedition_id' => $id, 'character_id' => $c->id, 'last_seen' => self::milliseconds()]);
@@ -71,12 +71,13 @@ final class World
             abort_unless($e->status === 'lobby', 409, 'already_started');
             abort_if(DB::table('settlements')->where('expedition_id',$e->id)->where('character_id',$c->id)->exists(),409,'already_left');
             $state = json_decode($e->state, true, 512, JSON_THROW_ON_ERROR);
-            abort_if(count($state['players']) >= 4, 409, 'party_full');
-            abort_unless($c->campaign>=Catalog::biomes()[$state['biome']??'mines']['chapter'],409,'biome_locked');
+            $mode = $state['mode'] ?? 'expedition';
+            abort_if(count($state['players']) >= ($mode === 'duel' ? 2 : 4), 409, 'party_full');
+            abort_unless($mode==='duel' || $c->campaign>=Catalog::biomes()[$state['biome']??'mines']['chapter'],409,'biome_locked');
             $names = array_map(static fn ($p) => array_intersect_key($p,array_flip(['name','class_id','level','max_hp','max_mana','damage_bonus','armor','power','equipment','potions'])), $state['players']);
             $characters=new Characters; $characters->starter($c);
             $names[$c->id] = $characters->profile($c);
-            $state = Game::create($state['seed'], $names,$state['biome']??'mines');
+            $state = Game::create($state['seed'], $names,$state['biome']??'mines',$mode);
             // Bump the revision so open world streams notice the new member.
             DB::table('expeditions')->where('id', $e->id)->update(['state' => json_encode($state), 'revision' => $e->revision + 1]);
             DB::table('expedition_members')->insert(['expedition_id' => $e->id, 'character_id' => $c->id, 'last_seen' => self::milliseconds()]);
@@ -95,6 +96,7 @@ final class World
                 return;
             }
             $s=json_decode($e->state,true);
+            abort_if(($s['mode']??'')==='duel' && count($s['players'])<2,409,'need_opponent');
             foreach ($s['players'] as $pid=>$player) {
                 $c=DB::table('characters')->where('id',$pid)->lockForUpdate()->first();
                 DB::table('characters')->where('id',$pid)->update(['supplies'=>max(0,$c->supplies-max(0,($player['potions']??3)-3))]);
@@ -122,6 +124,7 @@ final class World
                 if ($p['outcome']===null && ($cancelLobby || $pid===$character)) $p['outcome']='abandoned';
             }
             unset($p);
+            if ($e->status==='active') $s=Game::resolveDuel($s);
             if (!array_filter($s['players'],static fn($p)=>$p['outcome']===null)) $s['status']='completed';
             $this->persist($e,$s,'leave',['character_id'=>$character,'cancel_lobby'=>$cancelLobby]);
             if ($e->status==='lobby' && !$cancelLobby) {
@@ -304,6 +307,8 @@ final class World
         DB::table('game_events')->insert(['expedition_id' => $e->id, 'revision' => $e->revision + 1, 'kind' => $kind,
             'payload' => json_encode($payload), 'state_hash' => hash('sha256', $json), 'created_at' => now()]);
         // The entire current snapshot and economic settlement share a transaction.
+        $duel = ($s['mode'] ?? '') === 'duel';
+        $ratings = $duel ? DB::table('characters')->whereIn('id', array_keys($s['players']))->pluck('rating', 'id')->all() : [];
         foreach ($s['players'] as $id => $p) {
             if ($p['outcome'] === null || isset($this->settled[$e->id.':'.$id])) {
                 continue;
@@ -313,17 +318,24 @@ final class World
                 continue;
             }
             $c = DB::table('characters')->where('id', $id)->lockForUpdate()->first();
+            if ($duel) {
+                $this->settleDuel($e, $s, $id, $c, $ratings);
+                $this->settled[$e->id.':'.$id] = true;
+                continue;
+            }
             $extracted = $p['outcome'] === 'extracted';
             $gold = $extracted ? $p['gold'] : 0;
             $xp = $extracted ? $p['xp'] : intdiv($p['xp'],4);
             $essence = $extracted ? (int) ($p['essence'] ?? 0) : 0;
             $area = Catalog::biomes()[$s['biome']??'mines'];
             $chapter = $area['chapter'];
-            $won=$extracted && $s['floor']===Game::lastFloor($s) && isset($s['enemies']['boss']) && $s['enemies']['boss']['hp']===0;
+            // Any slain boss of the area counts; older snapshots only knew the boss of the final floor.
+            $won=$extracted && (($s['bosses_slain']??0)>0 || ($s['floor']===Game::bossFloor($s) && isset($s['enemies']['boss']) && $s['enemies']['boss']['hp']===0));
             if ($won && $c->campaign===$chapter) { $gold+=50*($chapter+1);$xp+=40*($chapter+1); }
             DB::table('settlements')->insert(['expedition_id' => $e->id, 'character_id' => $id, 'outcome' => $p['outcome'],
                 'gold' => $gold, 'xp' => $xp, 'created_at' => now(), 'updated_at' => now()]);
-            $update = ['gold' => $c->gold + $gold, 'xp' => $c->xp + $xp, 'essence' => $c->essence + $essence, 'active_expedition' => null];
+            $update = ['gold' => $c->gold + $gold, 'xp' => $c->xp + $xp, 'essence' => $c->essence + $essence, 'active_expedition' => null,
+                'best_depth' => max((int) $c->best_depth, $extracted ? $s['floor'] : $s['floor'] - 1)];
             // Bounty progress counts only for heroes who made it back to report.
             $bounty = $c->bounty ? json_decode($c->bounty, true) : null;
             if ($extracted && $bounty && isset($p['slain'][$bounty['type']])) {
@@ -336,5 +348,22 @@ final class World
             if ($extracted) foreach ($p['loot']??[] as $key) (new Characters)->grant($id,$key);
             $this->settled[$e->id.':'.$id] = true;
         }
+    }
+
+    /** Duels move no gold, experience or loot: only the Elo rating and the win/loss record. */
+    private function settleDuel(object $e, array $s, string $id, object $c, array $ratings): void
+    {
+        $p = $s['players'][$id];
+        $score = match ($p['outcome']) { 'victory' => 1.0, 'draw' => 0.5, default => 0.0 };
+        $opponents = array_diff_key($ratings, [$id => true]);
+        $delta = 0;
+        if ($opponents) {
+            $expected = 1 / (1 + 10 ** ((array_sum($opponents) / count($opponents) - ($ratings[$id] ?? 1000)) / 400));
+            $delta = (int) round(32 * ($score - $expected));
+        }
+        DB::table('settlements')->insert(['expedition_id' => $e->id, 'character_id' => $id, 'outcome' => $p['outcome'],
+            'gold' => 0, 'xp' => 0, 'created_at' => now(), 'updated_at' => now()]);
+        DB::table('characters')->where('id', $id)->update(['active_expedition' => null, 'rating' => max(100, $c->rating + $delta),
+            'duel_wins' => $c->duel_wins + ($score === 1.0 ? 1 : 0), 'duel_losses' => $c->duel_losses + ($score === 0.0 ? 1 : 0)]);
     }
 }

@@ -35,7 +35,7 @@ begin
   EnterCriticalSection(SharedLock);
   try
     if SharedSession=nil then begin
-      SharedSession:=WinHttpOpen('GrimHollow/0.4',WINHTTP_ACCESS_TYPE_NO_PROXY,nil,nil,0);Check(SharedSession<>nil);
+      SharedSession:=WinHttpOpen('GrimHollow/0.5',WINHTTP_ACCESS_TYPE_NO_PROXY,nil,nil,0);Check(SharedSession<>nil);
       Check(HttpTimeouts(SharedSession,3000,3000,3000,3000));
     end;
     Result:=SharedSession;
@@ -51,7 +51,7 @@ begin
   Host:=UTF8Decode(U.Host);Path:=UTF8Decode(U.Path+U.Document);if Path='' then Path:='/';if U.Params<>'' then Path:=Path+'?'+UTF8Decode(U.Params);Verb:=UTF8Decode(Method);
   if Shared then Session:=GetSharedSession
   else begin
-    Session:=WinHttpOpen('GrimHollow/0.4',WINHTTP_ACCESS_TYPE_NO_PROXY,nil,nil,0);Check(Session<>nil);
+    Session:=WinHttpOpen('GrimHollow/0.5',WINHTTP_ACCESS_TYPE_NO_PROXY,nil,nil,0);Check(Session<>nil);
     Check(HttpTimeouts(Session,3000,3000,3000,3000));
   end;
   Connection:=WinHttpConnect(Session,PWideChar(Host),Port,0);Check(Connection<>nil);

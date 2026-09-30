@@ -29,7 +29,7 @@ final class ContentTest extends TestCase
         foreach ($enemies as $key=>$e) if (in_array('summon',$e['specials']??[],true)) self::assertArrayHasKey($e['summon'],$enemies,$key);
         foreach (Catalog::talents() as $t) self::assertContains($t['stat'],['armor','damage_bonus','max_mana','power','max_hp']);
         foreach ($items as $item) self::assertContains($item['slot'],['weapon','body','offhand','ring','amulet']);
-        self::assertCount(8,Catalog::spells());
+        self::assertCount(12,Catalog::spells());
     }
 
     public function test_every_area_generates_and_puts_its_boss_on_the_last_floor(): void
@@ -97,7 +97,7 @@ final class ContentTest extends TestCase
 
         $s=$this->arena();$s['enemies']=['h'=>['id'=>'h','type'=>'acolyte','x'=>9,'y'=>5,'hp'=>30,'max_hp'=>30,'ready_at'=>0],
             'x'=>['id'=>'x','type'=>'brute','x'=>9,'y'=>7,'hp'=>5,'max_hp'=>40,'ready_at'=>99]];
-        $s=Game::tick($s);self::assertSame(15,$s['enemies']['x']['hp']);
+        $s=Game::tick($s);self::assertSame(16,$s['enemies']['x']['hp']);
 
         $s=$this->arena();$s['enemies']=['b'=>['id'=>'b','type'=>'spore_bloater','x'=>6,'y'=>5,'hp'=>1,'max_hp'=>30,'ready_at'=>99]];
         $s=Game::command($s,'hero',['action'=>'attack','target_id'=>'b']);

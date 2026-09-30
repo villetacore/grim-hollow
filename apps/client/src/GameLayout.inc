@@ -60,10 +60,13 @@ begin
   AddButton('Покинуть / отменить поход','LeaveButton',414);
   AddButton('Помочь павшему союзнику [R]','ReviveButton',450);
   LabelAt(Self,FPanel,'Помощь: 3 секунды без получения урона. Одно святилище на переходе возвращает павшего.',16,490,330,50);
-  LabelAt(Self,FPanel,'Область похода (следующая открывается после босса)',16,544,330,40);
+  LabelAt(Self,FPanel,'Область (следующая открывается после её первого босса). Подземелье бесконечно: босс каждые 3–5 этажей.',16,530,330,56);
   FBiome:=TComboBox.Create(Self);FBiome.Parent:=FPanel;FBiome.Style:=csDropDownList;FBiome.SetBounds(16,590,330,28);
   FBiome.Items.Add('I. Затопленные шахты');FBiome.Items.Add('II. Монастырь без колокола');FBiome.Items.Add('III. Корневая бездна');
-  FBiome.Items.Add('IV. Пепельные катакомбы (4 этажа)');FBiome.Items.Add('V. Стеклянный ледник (4 этажа)');FBiome.Items.Add('VI. Пылающая цитадель (5 этажей)');FBiome.ItemIndex:=0;
+  FBiome.Items.Add('IV. Пепельные катакомбы');FBiome.Items.Add('V. Стеклянный ледник');FBiome.Items.Add('VI. Пылающая цитадель');FBiome.ItemIndex:=0;
+  LabelAt(Self,FPanel,'Режим: поход вглубь без конца или дуэль один на один (рейтинг)',16,626,330,40);
+  FMode:=TComboBox.Create(Self);FMode.Parent:=FPanel;FMode.Style:=csDropDownList;FMode.SetBounds(16,668,330,28);
+  FMode.Items.Add('Поход в подземелье');FMode.Items.Add('Дуэль с другим игроком');FMode.ItemIndex:=0;
   FPanel:=PageHost(FHeroTab);
   FHeroInfo:=LabelAt(Self,FPanel,'Выберите персонажа.',16,16,330,300);
   AddButton('+ Сила: +2 к урону','StrengthButton',326);AddButton('+ Живучесть: +10 HP','VitalityButton',364);AddButton('+ Разум: +3 магии, +5 MP','IntellectButton',402);
@@ -72,15 +75,16 @@ begin
   FPanel:=PageHost(FBagTab);
   LabelAt(Self,FPanel,'Снаряжение и рюкзак  /  * = надето',16,12,330,28);
   FBag:=TListBox.Create(Self);FBag.Parent:=FPanel;FBag.SetBounds(16,46,330,262);FBag.Color:=TownColor;FBag.Font.Color:=GoldColor;FBag.OnClick:=@SelectItem;
+  FBag.Style:=lbOwnerDrawFixed;FBag.ItemHeight:=28;FBag.OnDrawItem:=@DrawListItem;FBagSpecs:=TStringList.Create;
   FItemInfo:=LabelAt(Self,FPanel,'Выберите вещь, чтобы посмотреть свойства.',16,324,330,100);
   AddButton('Надеть выбранную вещь','EquipButton',438);AddButton('Снять в рюкзак','UnequipButton',472);AddButton('Продать выбранную вещь','SellButton',506);
   LabelAt(Self,FPanel,'Слоты: оружие, доспех, щит, кольцо и амулет. Новый предмет заменяет старый в своём слоте. Продажа — только снятых вещей.',16,548,330,88);
   FPanel:=PageHost(FSpellTab);
   FSpells:=TListBox.Create(Self);FSpells.Parent:=FPanel;FSpells.SetBounds(16,16,330,176);FSpells.Color:=TownColor;FSpells.Font.Color:=GoldColor;FSpells.OnClick:=@SelectSpell;
+  FSpells.Style:=lbOwnerDrawFixed;FSpells.ItemHeight:=26;FSpells.OnDrawItem:=@DrawListItem;
   FSpellInfo:=LabelAt(Self,FPanel,'Книга заклинаний откроется после выбора героя.',16,200,330,160);
   AddButton('Применить выбранное заклинание','CastButton',370);
-  LabelAt(Self,FPanel,'[4] Огненная стрела  [5] Исцеление'+LineEnding+'[6] Ледяное копьё  [7] Кольцо пламени'+LineEnding+
-    '[8] Ядовитый шип  [9] Цепная молния'+LineEnding+'[0] Святой барьер  [Q] Метеор'+LineEnding+LineEnding+'Цель — ближайший видимый враг. Хранитель лечит самого раненого союзника рядом; остальные — себя. Мана: +3 в секунду.',16,418,330,170);
+  LabelAt(Self,FPanel,'Клавиши: 4–0, Q, Z, C, V, G. Цель — щелчок по врагу или Tab (правый щелчок — сразу удар); без цели — ближайший. Волна [C] и скачок [Z] идут по направлению последнего шага. Хранитель лечит самого раненого союзника рядом. Мана: +3 в секунду; перезарядки видны на панели под картой.',16,418,330,170);
   FTabs.ActivePage:=FAccountTab;
   FMap:=TGameMap.Create(Self);FMap.Parent:=Self;FMap.Align:=alClient;FMap.TabStop:=True;FMap.OnPaint:=@Draw;FMap.OnMouseDown:=@MapMouse;FMap.OnKeyDown:=@KeyInput;
   FTimer:=TTimer.Create(Self);FTimer.Enabled:=False;FTimer.Interval:=100;FTimer.OnTimer:=@Poll;

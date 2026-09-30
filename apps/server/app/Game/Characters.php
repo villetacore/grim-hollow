@@ -14,13 +14,20 @@ final class Characters
         if ($c->starter_granted) return;
         $weapon=match($c->class_id){'arcanist'=>'oak_staff','ranger'=>'hunting_bow','warden'=>'healer_mace',default=>'iron_sword'};
         foreach ([$weapon,'leather','buckler','ember_ring'] as $key) {
-            $this->grant($c->id,$key,$key==='ember_ring'?null:Catalog::items()[$key]['slot'],true);
+            $this->grant($c->id,$key,$key==='ember_ring'?null:Catalog::item($key)['slot'],true);
         }
         DB::table('characters')->where('id',$c->id)->update(['starter_granted'=>true]);
     }
     public function grant(string $id,string $key,?string $slot=null,bool $bound=false): void
     {
         DB::table('character_items')->insert(['id'=>(string)Str::ulid(),'character_id'=>$id,'definition'=>$key,'equipped_slot'=>$slot,'bound'=>$bound||$slot!==null,'created_at'=>now()]);
+    }
+    /** Item stats for the client, with smithing prices for generated gear. */
+    public static function describe(string $key): array
+    {
+        $item=Catalog::item($key);
+        if ($item['generated']) $item+=['upgrade_cost'=>Catalog::upgradeCost($item['tier']),'enchant_cost'=>Catalog::enchantCost($item['tier'])];
+        return $item;
     }
     public function profile(object $c): array
     {
@@ -35,10 +42,12 @@ final class Characters
             $c=DB::table('characters')->where('user_id',$account)->where('id',$id)->lockForUpdate()->first();
             abort_unless($c,404,'character_not_found'); $this->starter($c);
             $progress=Catalog::progression((int)$c->xp);
-            $items=DB::table('character_items')->where('character_id',$id)->where('escrow',false)->orderBy('created_at')->orderBy('id')->get()->map(fn($i)=>(array)$i+Catalog::items()[$i->definition]);
+            $items=DB::table('character_items')->where('character_id',$id)->where('escrow',false)->orderBy('created_at')->orderBy('id')->get()->map(fn($i)=>(array)$i+self::describe($i->definition));
             return ['id'=>$id,'name'=>$c->name,'class_id'=>$c->class_id,'gold'=>(int)$c->gold,'xp'=>(int)$c->xp,
                 'active_expedition'=>$c->active_expedition,'campaign'=>$c->campaign,'materials'=>$c->materials,'essence'=>(int)($c->essence??0),
-                'bounty'=>$c->bounty?json_decode($c->bounty,true):null,'supplies'=>$c->supplies,'craft_xp'=>$c->craft_xp,
+                'bounty'=>$c->bounty?json_decode($c->bounty,true):null,'best_depth'=>(int)$c->best_depth,'rating'=>(int)$c->rating,
+                'duel_wins'=>(int)$c->duel_wins,'duel_losses'=>(int)$c->duel_losses,
+                'forge_limit'=>Catalog::forgeLimit($progress['level'],(int)$c->best_depth),'supplies'=>$c->supplies,'craft_xp'=>$c->craft_xp,
                 'biomes'=>Catalog::biomes(),'attributes'=>['strength'=>$c->strength,'vitality'=>$c->vitality,'intellect'=>$c->intellect],
                 'points'=>max(0,($progress['level']-1)*2-$c->strength-$c->vitality-$c->intellect),
                 'stats'=>$this->profile($c),'items'=>$items,'spells'=>Catalog::spells(),'enemies'=>Catalog::enemies(),'objects'=>Catalog::objects()]+$progress;
@@ -60,7 +69,7 @@ final class Characters
                 DB::table('characters')->where('id',$id)->increment($stat);
             } else {
                 $item=DB::table('character_items')->where('id',$d['item_id']??'')->where('character_id',$id)->where('escrow',false)->first();
-                abort_unless($item,404,'item_not_found'); $def=Catalog::items()[$item->definition];
+                abort_unless($item,404,'item_not_found'); $def=Catalog::item($item->definition);
                 if ($d['action']==='equip') {
                     abort_unless(Catalog::progression((int)$c->xp)['level']>=$def['level'],409,'level_required');
                     DB::table('character_items')->where('character_id',$id)->where('equipped_slot',$def['slot'])->update(['equipped_slot'=>null]);

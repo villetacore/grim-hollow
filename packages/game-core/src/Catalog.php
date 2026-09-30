@@ -2,9 +2,24 @@
 declare(strict_types=1);
 namespace GrimHollow\Core;
 
+use DomainException;
+
 /** Shared, versioned game rules; clients display these values, never decide them. */
 final class Catalog
 {
+    public const MAX_LEVEL = 100;
+    public const TALENT_RANKS = 10;
+    public const BOSSES = ['warden', 'prior', 'rift_heart', 'bone_king', 'frost_queen', 'ash_tyrant'];
+    /** Icon shape of each named item; generated gear uses its base key. */
+    private const ICONS = ['iron_sword'=>'blade','oak_staff'=>'staff','hunting_bow'=>'bow','healer_mace'=>'mace','leather'=>'jerkin',
+        'buckler'=>'shield','ember_ring'=>'ring','steel_sword'=>'blade','chainmail'=>'mail','ash_staff'=>'staff','warden_shield'=>'shield',
+        'bone_axe'=>'axe','monk_staff'=>'staff','recurve_bow'=>'bow','censer_mace'=>'mace','thorn_bow'=>'bow','rift_blade'=>'blade',
+        'root_staff'=>'staff','grave_hammer'=>'hammer','soul_staff'=>'staff','frost_bow'=>'bow','glacier_edge'=>'blade','ember_scepter'=>'wand',
+        'tyrant_blade'=>'blade','monk_robe'=>'robe','scale_armor'=>'mail','bark_mail'=>'jerkin','bone_plate'=>'plate','frost_coat'=>'robe',
+        'ash_plate'=>'plate','bell_shield'=>'shield','spell_tome'=>'tome','bone_ward'=>'orb','glacier_aegis'=>'shield','silver_ring'=>'ring',
+        'viper_ring'=>'ring','sage_ring'=>'ring','king_ring'=>'signet','ember_band'=>'signet','amber_amulet'=>'amulet','prior_icon'=>'talisman',
+        'heart_seed'=>'amulet','wolf_fang'=>'talisman','frost_pendant'=>'amulet','phoenix_feather'=>'talisman'];
+
     /**
      * Areas unlock in order. The first three return the fires (main campaign); the deeper
      * three are post-campaign expeditions with more floors and harder foes.
@@ -86,6 +101,137 @@ final class Catalog
             'bone_king'=>['name'=>'Костяной король','hp'=>200,'damage'=>16,'range'=>1,'attack'=>14,'step'=>6,'xp'=>90,'armor'=>4,'boss'=>true,'specials'=>['summon','slam'],'summon'=>'skeleton'],
             'frost_queen'=>['name'=>'Королева инея','hp'=>220,'damage'=>17,'range'=>5,'attack'=>15,'step'=>6,'xp'=>100,'armor'=>3,'boss'=>true,'specials'=>['chill','summon'],'summon'=>'frost_wolf'],
             'ash_tyrant'=>['name'=>'Пепельный тиран','hp'=>260,'damage'=>20,'range'=>1,'attack'=>13,'step'=>5,'xp'=>120,'armor'=>6,'boss'=>true,'specials'=>['slam','summon','poison'],'summon'=>'hellhound'],
+        ];
+    }
+
+    /** Gear bases: stats at tier 1; every further tier adds half of them again. crit is a flat chance. */
+    public static function bases(): array {
+        return [
+            'blade'=>['name'=>'Клинок','slot'=>'weapon','damage'=>4],
+            'axe'=>['name'=>'Секира','slot'=>'weapon','damage'=>5,'hp'=>4],
+            'hammer'=>['name'=>'Молот','slot'=>'weapon','damage'=>6,'armor'=>1],
+            'dagger'=>['name'=>'Кинжал','slot'=>'weapon','damage'=>3,'crit'=>6],
+            'mace'=>['name'=>'Булава','slot'=>'weapon','damage'=>3,'power'=>3],
+            'staff'=>['name'=>'Посох','slot'=>'weapon','damage'=>1,'power'=>5],
+            'wand'=>['name'=>'Жезл','slot'=>'weapon','power'=>4,'mana'=>6],
+            'bow'=>['name'=>'Лук','slot'=>'weapon','damage'=>4,'power'=>1],
+            'crossbow'=>['name'=>'Арбалет','slot'=>'weapon','damage'=>5,'crit'=>3],
+            'robe'=>['name'=>'Мантия','slot'=>'body','armor'=>1,'power'=>2,'mana'=>6],
+            'jerkin'=>['name'=>'Куртка','slot'=>'body','armor'=>2,'damage'=>1],
+            'mail'=>['name'=>'Кольчуга','slot'=>'body','armor'=>3],
+            'plate'=>['name'=>'Латы','slot'=>'body','armor'=>4,'hp'=>6],
+            'shield'=>['name'=>'Щит','slot'=>'offhand','armor'=>3],
+            'tome'=>['name'=>'Фолиант','slot'=>'offhand','power'=>3,'mana'=>6],
+            'orb'=>['name'=>'Сфера','slot'=>'offhand','power'=>4],
+            'quiver'=>['name'=>'Колчан','slot'=>'offhand','damage'=>2,'crit'=>3],
+            'ring'=>['name'=>'Кольцо','slot'=>'ring','damage'=>1,'power'=>1],
+            'signet'=>['name'=>'Печатка','slot'=>'ring','armor'=>1,'hp'=>5],
+            'amulet'=>['name'=>'Амулет','slot'=>'amulet','hp'=>8],
+            'talisman'=>['name'=>'Талисман','slot'=>'amulet','power'=>2,'mana'=>6],
+        ];
+    }
+
+    /** Enchantments: per-tier bonus for stats, flat (+1 per 5 tiers) for crit and life leech percent. */
+    public static function affixes(): array {
+        return [
+            'fierce'=>['name'=>'ярости','damage'=>1],
+            'warding'=>['name'=>'стойкости','armor'=>1],
+            'arcane'=>['name'=>'чародейства','power'=>1.5],
+            'vital'=>['name'=>'жизни','hp'=>6],
+            'mystic'=>['name'=>'мудрости','mana'=>5],
+            'balanced'=>['name'=>'равновесия','damage'=>0.5,'armor'=>0.5,'power'=>0.5],
+            'keen'=>['name'=>'меткости','crit'=>5],
+            'vampiric'=>['name'=>'крови','leech'=>5],
+        ];
+    }
+
+    /** Preferred weapon/armour bases per class for drops. */
+    private const CLASS_BASES = [
+        'guardian'=>['blade','axe','hammer','mace','plate','mail','shield','signet'],
+        'arcanist'=>['staff','wand','robe','tome','orb','talisman','ring'],
+        'ranger'=>['bow','crossbow','dagger','jerkin','quiver','ring','amulet'],
+        'warden'=>['mace','staff','hammer','robe','mail','shield','talisman'],
+    ];
+
+    /** Resolves a named item or a generated key such as "blade+7~fierce" (base + tier ~ affix). */
+    public static function item(string $key): array
+    {
+        $static = self::items()[$key] ?? null;
+        if ($static) {
+            return $static + ['icon'=>self::ICONS[$key] ?? 'ring','tier'=>intdiv($static['level'] + 2, 3),'crit'=>0,'leech'=>0,'unique'=>true,'generated'=>false];
+        }
+        if (! preg_match('/^([a-z]+)\+(\d{1,3})(?:~([a-z]+))?$/', $key, $m) || ! isset(self::bases()[$m[1]])) {
+            throw new DomainException('unknown_item');
+        }
+        $tier = max(1, (int) $m[2]);
+        $base = self::bases()[$m[1]];
+        $affixKey = $m[3] ?? '';
+        $affix = $affixKey === '' ? [] : (self::affixes()[$affixKey] ?? throw new DomainException('unknown_item'));
+        $grow = 1 + 0.5 * ($tier - 1);
+        $item = ['name'=>$base['name'].($affix ? ' '.$affix['name'] : '').' +'.$tier, 'slot'=>$base['slot'], 'icon'=>$m[1], 'tier'=>$tier,
+            'affix'=>$affixKey, 'unique'=>false, 'generated'=>true];
+        foreach (['damage', 'armor', 'power', 'hp', 'mana'] as $stat) {
+            $item[$stat] = (int) round(($base[$stat] ?? 0) * $grow + ($affix[$stat] ?? 0) * $tier);
+        }
+        foreach (['crit', 'leech'] as $stat) {
+            $item[$stat] = ($base[$stat] ?? 0) + (isset($affix[$stat]) ? $affix[$stat] + intdiv($tier, 5) : 0);
+        }
+        $item['level'] = min(self::MAX_LEVEL, max(1, 3 * $tier - 3));
+        $item['price'] = 4 * $tier * ($tier + 1) + ($affix ? 5 * $tier : 0);
+
+        return $item;
+    }
+
+    /** A deterministic drop: class-flavoured base half of the time, optional enchantment. */
+    public static function generate(Random $rng, int $tier, bool $affix, string $class): string
+    {
+        $bases = array_keys(self::bases());
+        $pool = $rng->next(1, 100) <= 50 ? (self::CLASS_BASES[$class] ?? $bases) : $bases;
+        $key = $pool[$rng->next(0, count($pool) - 1)].'+'.max(1, min(999, $tier));
+        if ($affix) {
+            $affixes = array_keys(self::affixes());
+            $key .= '~'.$affixes[$rng->next(0, count($affixes) - 1)];
+        }
+
+        return $key;
+    }
+
+    public static function forgeCost(int $tier, bool $affix): array
+    {
+        return ['gold'=>6 * $tier * $tier + 8 * $tier, 'materials'=>2 + $tier, 'essence'=>intdiv($tier, 4) + ($affix ? 1 : 0)];
+    }
+
+    public static function upgradeCost(int $tier): array
+    {
+        return ['gold'=>4 * ($tier + 1) * ($tier + 1), 'materials'=>1 + $tier, 'essence'=>intdiv($tier + 1, 5)];
+    }
+
+    public static function enchantCost(int $tier): array
+    {
+        return ['gold'=>5 * $tier + 10, 'materials'=>0, 'essence'=>1 + intdiv($tier, 4)];
+    }
+
+    /** Highest tier the smith can forge for a hero of this level and deepest floor reached. */
+    public static function forgeLimit(int $level, int $depth): int
+    {
+        return max(2, intdiv($level + 2, 3) + 1, intdiv($depth, 2) + 1);
+    }
+
+    /** Monster modifiers; several can stack on one creature. */
+    public static function enemyAffixes(): array {
+        return [
+            'venomous'=>['name'=>'ядовитый','specials'=>['poison']],
+            'frozen'=>['name'=>'ледяной','specials'=>['chill']],
+            'armored'=>['name'=>'бронированный','armor'=>3],
+            'swift'=>['name'=>'стремительный','step'=>-2,'attack'=>-4],
+            'giant'=>['name'=>'гигант','hp'=>0.6,'damage'=>0.3],
+            'vampiric'=>['name'=>'вампир','specials'=>['leech']],
+            'arcane'=>['name'=>'колдун','range'=>4],
+            'explosive'=>['name'=>'взрывной','specials'=>['explode']],
+            'shaman'=>['name'=>'шаман','specials'=>['heal']],
+            'soul_eater'=>['name'=>'пожиратель душ','specials'=>['drain']],
+            'berserk'=>['name'=>'берсерк','specials'=>['berserk']],
+            'regenerating'=>['name'=>'живучий','specials'=>['regen']],
         ];
     }
 
@@ -206,6 +352,10 @@ final class Catalog
             'chain'=>['name'=>'Цепная молния','kind'=>'chain','level'=>6,'mana'=>28,'cooldown'=>45,'range'=>6,'damage'=>24,'key'=>'9','description'=>'Бьёт до трёх ближайших видимых врагов в радиусе 6.'],
             'barrier'=>['name'=>'Святой барьер','kind'=>'barrier','level'=>8,'mana'=>30,'cooldown'=>90,'range'=>3,'duration'=>40,'key'=>'0','description'=>'Вы и союзники в радиусе 3 получают вдвое меньше урона 4 секунды.'],
             'meteor'=>['name'=>'Метеор','kind'=>'meteor','level'=>12,'mana'=>45,'cooldown'=>90,'range'=>6,'damage'=>45,'key'=>'Q','description'=>'45 урона по цели и половина — всем врагам рядом с ней.'],
+            'whirlwind'=>['name'=>'Вихрь клинков','kind'=>'whirl','level'=>3,'mana'=>15,'cooldown'=>30,'range'=>1,'damage'=>14,'key'=>'V','description'=>'Удар оружием по всем соседним врагам: 14 + бонус урона.'],
+            'blink'=>['name'=>'Скачок','kind'=>'blink','level'=>5,'mana'=>12,'cooldown'=>50,'range'=>3,'key'=>'Z','description'=>'Мгновенный рывок до 3 клеток в сторону взгляда.'],
+            'fire_wave'=>['name'=>'Огненная волна','kind'=>'wave','level'=>7,'mana'=>24,'cooldown'=>40,'range'=>5,'damage'=>26,'key'=>'C','description'=>'Пламя бьёт всех врагов на линии в 5 клеток по направлению взгляда.'],
+            'drain_life'=>['name'=>'Похищение жизни','kind'=>'drain','level'=>9,'mana'=>22,'cooldown'=>35,'range'=>5,'damage'=>18,'key'=>'G','description'=>'Вытягивает здоровье цели и лечит заклинателя на ту же величину.'],
         ];
     }
 
@@ -223,24 +373,24 @@ final class Catalog
     public static function progression(int $xp): array
     {
         $level=1;
-        while ($level<20 && $xp>=self::threshold($level+1)) $level++;
-        return ['level'=>$level,'level_xp'=>self::threshold($level),'next_level_xp'=>$level<20 ? self::threshold($level+1) : null];
+        while ($level<self::MAX_LEVEL && $xp>=self::threshold($level+1)) $level++;
+        return ['level'=>$level,'level_xp'=>self::threshold($level),'next_level_xp'=>$level<self::MAX_LEVEL ? self::threshold($level+1) : null];
     }
     private static function threshold(int $level): int { return 20*($level-1)*$level; }
 
     public static function profile(string $name, string $class, int $xp, array $attributes, array $equipment): array
     {
         $level=self::progression($xp)['level'];
-        $damage=($attributes['strength']??0)*2; $armor=0; $power=($attributes['intellect']??0)*3; $hp=0; $mana=0;
+        $damage=($attributes['strength']??0)*2; $armor=0; $power=($attributes['intellect']??0)*3; $hp=0; $mana=0; $crit=0; $leech=0;
         foreach ($equipment as $key) {
-            $item=self::items()[$key]; $damage+=$item['damage']; $armor+=$item['armor']; $power+=$item['power'];
-            $hp+=$item['hp']; $mana+=$item['mana'];
+            $item=self::item($key); $damage+=$item['damage']; $armor+=$item['armor']; $power+=$item['power'];
+            $hp+=$item['hp']; $mana+=$item['mana']; $crit+=$item['crit']; $leech+=$item['leech'];
         }
         if ($class==='ranger') $damage+=2;
         if ($class==='warden') $power+=3;
         return ['name'=>$name,'class_id'=>$class,'level'=>$level,
             'max_hp'=>100+($level-1)*10+($attributes['vitality']??0)*10+$hp,
             'max_mana'=>match($class){'arcanist'=>100,'warden'=>80,'ranger'=>70,default=>60}+($level-1)*5+($attributes['intellect']??0)*5+$mana,
-            'damage_bonus'=>$damage,'armor'=>$armor,'power'=>$power,'equipment'=>$equipment];
+            'damage_bonus'=>$damage,'armor'=>$armor,'power'=>$power,'crit'=>min(50,$crit),'leech'=>min(30,$leech),'equipment'=>$equipment];
     }
 }

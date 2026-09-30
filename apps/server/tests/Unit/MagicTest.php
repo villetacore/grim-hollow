@@ -50,7 +50,7 @@ final class MagicTest extends TestCase
     public function test_level_boundaries_and_legacy_lobby_profile(): void
     {
         self::assertSame(1,Catalog::progression(39)['level']);self::assertSame(2,Catalog::progression(40)['level']);
-        self::assertSame(20,Catalog::progression(100000)['level']);self::assertNull(Catalog::progression(100000)['next_level_xp']);
+        self::assertSame(71,Catalog::progression(100000)['level']);self::assertSame(100,Catalog::progression(10**9)['level']);self::assertNull(Catalog::progression(10**9)['next_level_xp']);
         $s=Game::create(1,['old'=>['name'=>'Old','max_hp'=>100]]);self::assertSame(60,$s['players']['old']['mana']);
     }
 }

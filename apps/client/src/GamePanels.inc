@@ -26,7 +26,9 @@ begin
     'Здоровье: '+JStr(FSheet,'stats.max_hp')+'   Мана: '+JStr(FSheet,'stats.max_mana')+LineEnding+
     'Бонус урона: '+JStr(FSheet,'stats.damage_bonus')+'   Броня: '+JStr(FSheet,'stats.armor')+LineEnding+
     'Сила магии: '+JStr(FSheet,'stats.power')+LineEnding+
-    'Эссенция: '+JStr(FSheet,'essence','0')+'   Огней возвращено: '+JStr(FSheet,'campaign','0');
+    'Эссенция: '+JStr(FSheet,'essence','0')+'   Пройдено областей: '+JStr(FSheet,'campaign','0')+'/6'+LineEnding+
+    'Рекорд глубины: '+JStr(FSheet,'best_depth','0')+'   Кузница до +'+JStr(FSheet,'forge_limit','2')+LineEnding+
+    'Дуэли: рейтинг '+JStr(FSheet,'rating','1000')+', побед '+JStr(FSheet,'duel_wins','0')+', поражений '+JStr(FSheet,'duel_losses','0');
   FExperience.Max:=JInt(FSheet,'next_level_xp',JInt(FSheet,'xp')+1)-JInt(FSheet,'level_xp');
   FExperience.Position:=JInt(FSheet,'xp')-JInt(FSheet,'level_xp');
   if FExpedition='' then begin
@@ -34,10 +36,11 @@ begin
     FHealth.Max:=JInt(FSheet,'stats.max_hp',100);FHealth.Position:=FHealth.Max;
     FMana.Max:=JInt(FSheet,'stats.max_mana',60);FMana.Position:=FMana.Max;
   end;
-  OldIndex:=FBag.ItemIndex;FBag.Clear;Items:=FSheet.FindPath('items');
+  OldIndex:=FBag.ItemIndex;FBag.Clear;FBagSpecs.Clear;Items:=FSheet.FindPath('items');
   for I:=0 to Items.Count-1 do begin
-    Prefix:='   ';if JStr(Items.Items[I],'equipped_slot')<>'' then Prefix:='* ';
+    Prefix:='';if JStr(Items.Items[I],'equipped_slot')<>'' then Prefix:='* ';
     FBag.Items.Add(Prefix+JStr(Items.Items[I],'name'));
+    FBagSpecs.Add('i|'+JStr(Items.Items[I],'icon')+'|'+JStr(Items.Items[I],'tier','1')+'|'+BoolToStr(JBool(Items.Items[I],'unique'),'1','0'));
   end;
   if OldIndex>=FBag.Count then OldIndex:=FBag.Count-1;
   if (OldIndex<0) and (FBag.Count>0) then OldIndex:=0;FBag.ItemIndex:=OldIndex;SelectItem(nil);
@@ -45,7 +48,7 @@ begin
   for I:=0 to SpellCount-1 do begin
     S:=FSheet.FindPath('spells.'+SpellKey(I));if S=nil then Continue;Prefix:='';
     if LevelValue<JInt(S,'level') then Prefix:='[закрыто] ';
-    FSpells.Items.Add('['+JStr(S,'key')+'] '+Prefix+JStr(S,'name')+' (ур.'+JStr(S,'level')+')');
+    FSpells.Items.Add('['+JStr(S,'key')+'] '+Prefix+JStr(S,'name')+' (ур.'+JStr(S,'level')+', '+JStr(S,'mana')+' MP)');
   end;
   if OldIndex<0 then OldIndex:=0;FSpells.ItemIndex:=OldIndex;SelectSpell(nil);
 end;

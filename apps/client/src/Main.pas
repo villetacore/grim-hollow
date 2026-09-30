@@ -2,7 +2,7 @@ unit Main;
 {$mode objfpc}{$H+}{$codepage utf8}
 interface
 uses Classes, SysUtils, Forms, Controls, Graphics, StdCtrls, ExtCtrls, Dialogs,
-  LCLType, LMessages, ComCtrls, fpjson, jsonparser, GameProtocol, GameTransport, GameTheme, GameData, GameRenderer, TownWindow, NativeNetwork, FieldGuide;
+  LCLType, LMessages, ComCtrls, fpjson, jsonparser, GameProtocol, GameTransport, GameTheme, GameData, GameRenderer, GameArt, TownWindow, NativeNetwork, FieldGuide;
 
 type
   TGameMap = class(TCustomControl)
@@ -55,6 +55,15 @@ type
     FPathX,FPathY:array[0..4] of Integer;
     FPathCount:Integer;
     FPredUntil:QWord;
+    // Fog of war memory, chosen target and the direction the hero faces.
+    FView:TMapView;
+    FExploreKey,FTarget,FFacing:string;
+    FMode:TComboBox;
+    FBagSpecs:TStringList;
+    function Hostiles(W:TJSONData):TJSONArray;
+    function PickTarget(W:TJSONData;Range:Integer;Adjacent:Boolean):string;
+    procedure CycleTarget;
+    procedure DrawListItem(Control:TWinControl;Index:Integer;ARect:TRect;State:TOwnerDrawState);
     function StreamLive:Boolean;
     function EstimatedTick:Int64;
     function CanAct:Boolean;
@@ -115,7 +124,56 @@ end;
 {$I GamePanels.inc}
 
 destructor TGameForm.Destroy;
-begin FWorld.Free;FSnapshot.Free; FSheet.Free; FCharacters.Free; inherited Destroy; end;
+begin FWorld.Free;FSnapshot.Free; FSheet.Free; FCharacters.Free; FBagSpecs.Free; inherited Destroy; end;
+
+{ Everything the hero may strike: monsters, plus the other duelists in a duel. Caller frees. }
+function TGameForm.Hostiles(W:TJSONData):TJSONArray;
+var I:Integer;E:TJSONData;
+begin
+  Result:=TJSONArray.Create;
+  for I:=0 to W.FindPath('enemies').Count-1 do Result.Add(W.FindPath('enemies').Items[I].Clone);
+  if JStr(W,'mode')='duel' then for I:=0 to W.FindPath('players').Count-1 do begin E:=W.FindPath('players').Items[I];
+    if (JStr(E,'id')<>FHero) and (JInt(E,'hp')>0) and (E.FindPath('outcome').JSONType=jtNull) then Result.Add(E.Clone);end;
+end;
+
+{ The chosen target when it is still visible and in range, otherwise the nearest hostile. }
+function TGameForm.PickTarget(W:TJSONData;Range:Integer;Adjacent:Boolean):string;
+var List:TJSONArray;I,D,Best:Integer;E:TJSONData;
+begin
+  Result:='';Best:=1000;List:=Hostiles(W);
+  try
+    for I:=0 to List.Count-1 do begin E:=List.Items[I];
+      D:=Abs(JInt(E,'x')-JInt(W,'self.x'))+Abs(JInt(E,'y')-JInt(W,'self.y'));
+      if (D>Range) or (Adjacent and (D<>1)) then Continue;
+      if JStr(E,'id')=FTarget then begin Result:=FTarget;Exit;end;
+      if D<Best then begin Best:=D;Result:=JStr(E,'id');end;
+    end;
+  finally List.Free;end;
+end;
+
+procedure TGameForm.CycleTarget;
+var W:TJSONData;List:TJSONArray;I,NextIndex:Integer;
+begin
+  if (FSnapshot=nil) or (FExpedition='') then Exit;
+  W:=FSnapshot.FindPath('world');List:=Hostiles(W);
+  try
+    if List.Count=0 then begin FTarget:='';FStatus.Caption:='Врагов в поле зрения нет.';Exit;end;
+    NextIndex:=0;
+    for I:=0 to List.Count-1 do if JStr(List.Items[I],'id')=FTarget then NextIndex:=(I+1) mod List.Count;
+    FTarget:=JStr(List.Items[NextIndex],'id');
+    FStatus.Caption:='Цель: '+JStr(List.Items[NextIndex],'name')+' — '+JStr(List.Items[NextIndex],'hp')+'/'+JStr(List.Items[NextIndex],'max_hp',JStr(List.Items[NextIndex],'hp'))+' HP.';
+  finally List.Free;end;
+  FMap.Invalidate;
+end;
+
+procedure TGameForm.DrawListItem(Control:TWinControl;Index:Integer;ARect:TRect;State:TOwnerDrawState);
+var Box:TListBox;Spec:string;
+begin
+  Box:=Control as TListBox;Spec:='';
+  if (Box=FBag) and (FBagSpecs<>nil) and (Index<FBagSpecs.Count) then Spec:=FBagSpecs[Index];
+  if Box=FSpells then Spec:='s|'+SpellKey(Index);
+  DrawIconRow(Box.Canvas,ARect,Box.Items[Index],Spec,odSelected in State);
+end;
 
 function TGameForm.StreamLive:Boolean;
 begin Result:=not FSmoke and FStreamSeen and (FWorld<>nil) and not FWorld.Finished; end;
@@ -185,6 +243,14 @@ begin
     if (JStr(O,'type')<>'trap') and not JBool(O,'used') and (Abs(JInt(O,'x')-X)+Abs(JInt(O,'y')-Y)<=1) then begin
       Result:='Рядом: '+GameWord(JStr(O,'type'))+'. Нажмите F, чтобы использовать.';Exit;end;
   end;
+end;
+
+function OutcomeText(const Outcome:string):string;
+begin
+  case Outcome of
+    'extracted':Result:='вы вернулись с добычей';'defeated':Result:='поражение';'abandoned':Result:='поход покинут';
+    'victory':Result:='ПОБЕДА в дуэли';'draw':Result:='ничья';
+  else Result:=Outcome;end;
 end;
 
 function ActionCooldown(const ActionName:string):Integer;
@@ -276,8 +342,25 @@ begin
 end;
 
 procedure TGameForm.MapMouse(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X,Y: Integer);
+var CX,CY,I:Integer;List:TJSONArray;E:TJSONData;
 begin
-  if (FExpedition='') and (FHero<>'') then ButtonClick(FindComponent('TownButton')) else FocusGame;
+  if (FExpedition='') and (FHero<>'') then begin ButtonClick(FindComponent('TownButton'));Exit;end;
+  FocusGame;
+  if (FSnapshot=nil) or (FView.S=0) or (X<FView.OX) or (Y<FView.OY) then Exit;
+  CX:=FView.LeftCell+(X-FView.OX) div FView.S;CY:=FView.TopCell+(Y-FView.OY) div FView.S;
+  if (CX>=FView.LeftCell+FView.Columns) or (CY>=FView.TopCell+FView.Rows) then Exit;
+  List:=Hostiles(FSnapshot.FindPath('world'));
+  try
+    FTarget:='';
+    for I:=0 to List.Count-1 do begin E:=List.Items[I];
+      if (JInt(E,'x')=CX) and (JInt(E,'y')=CY) then begin
+        FTarget:=JStr(E,'id');FStatus.Caption:='Цель: '+JStr(E,'name')+' — '+JStr(E,'hp')+'/'+JStr(E,'max_hp',JStr(E,'hp'))+' HP.';
+        // Right click strikes at once.
+        if Button=mbRight then Action('attack','');
+      end;
+    end;
+  finally List.Free;end;
+  FMap.Invalidate;
 end;
 
 procedure TGameForm.FocusGame;
@@ -385,8 +468,9 @@ begin
   end else if ButtonName='ExpeditionButton' then begin
     if FHero='' then begin FStatus.Caption:='Сначала создайте героя или войдите.'; Exit; end;
     D:=TJSONObject.Create(['character_id',FHero]);
-    case FBiome.ItemIndex of 1:Value:='monastery';2:Value:='roots';else Value:='mines';end;
+    case FBiome.ItemIndex of 1:Value:='monastery';2:Value:='roots';3:Value:='catacombs';4:Value:='glacier';5:Value:='citadel';else Value:='mines';end;
     D.Add('biome',Value);
+    if (FMode<>nil) and (FMode.ItemIndex=1) and (Trim(FCode.Text)='') then D.Add('mode','duel');
     if Trim(FCode.Text)<>'' then D.Add('join_code',Trim(FCode.Text));
     try Send('POST','expeditions',D.AsJSON,'expedition'); finally D.Free; end;
   end else if ButtonName='StartButton' then begin
@@ -524,6 +608,10 @@ begin
       ValidateSnapshot(D); FSnapshot.Free; FSnapshot:=D; D:=nil;FSnapshotAt:=GetTickCount64;
       ApplyPrediction;
       W:=FSnapshot.FindPath('world');
+      // A new floor (or run) starts with an unexplored map.
+      if FExploreKey<>FExpedition+':'+JStr(W,'floor')+':'+JStr(W,'biome') then begin
+        FExploreKey:=FExpedition+':'+JStr(W,'floor')+':'+JStr(W,'biome');ClearExplored(FView);FTarget:='';end;
+      Explore(FView,W.FindPath('map'));
       FCode.Text:=JStr(FSnapshot,'join_code');
       FHealth.Max:=JInt(W,'self.max_hp',100);FHealth.Position:=JInt(W,'self.hp');
       FMana.Max:=JInt(W,'self.max_mana',60);FMana.Position:=JInt(W,'self.mana',60);
@@ -532,7 +620,7 @@ begin
       FName.Enabled:=False; FCode.ReadOnly:=True;
       if FSnapshot.FindPath('lobby').AsBoolean then
         FStatus.Caption:='Подготовка группы: движение пока выключено. Лидер должен нажать «Начать».';
-      FStats.Caption:=JStr(W,'self.name')+' | Ур. '+JStr(W,'self.level','1')+' | Этаж '+JStr(W,'floor')+'/'+JStr(W,'last_floor','3')+
+      FStats.Caption:=JStr(W,'self.name')+' | Ур. '+JStr(W,'self.level','1')+' | Глубина '+JStr(W,'floor')+' (враги ур. '+JStr(W,'depth_level','1')+')'+
         ' | HP '+JStr(W,'self.hp')+'/'+JStr(W,'self.max_hp')+' | MP '+JStr(W,'self.mana','60')+
         ' | Зелья '+JStr(W,'self.potions')+' | Добыча: '+JStr(W,'self.gold')+' крон, '+JStr(W,'self.xp')+' XP';
       if W.FindPath('self.loot')<>nil then FStats.Caption:=FStats.Caption+' | Трофеи: '+IntToStr(W.FindPath('self.loot').Count);
@@ -544,7 +632,7 @@ begin
       if (JInt(W,'self.hp')=0) and (W.FindPath('self.outcome').JSONType=jtNull) then
         FStatus.Caption:='Вы выведены из боя. Союзник рядом может помочь [R] в течение 20 секунд. Затем остаётся святилище на переходе.';
       if W.FindPath('self.outcome').JSONType<>jtNull then begin
-        FStatus.Caption:='Результат: '+W.FindPath('self.outcome').AsString+'. Можно начать новую экспедицию.';
+        FStatus.Caption:='Результат: '+OutcomeText(W.FindPath('self.outcome').AsString)+'. Можно начать новый поход или дуэль.';
         FExpedition:=''; FCode.Clear;
         FHeroes.Enabled:=True;if FChannel.ItemIndex=1 then begin FChannel.ItemIndex:=0;ChannelChanged(nil);end;
         FPendingAction:=''; FServer.Enabled:=True; FEmail.Enabled:=True;
@@ -608,6 +696,7 @@ begin
   // Held keys are dispatched from the local tick estimate, not only when a snapshot arrives.
   if (FPendingAction<>'') and not FWsInFlight then begin DispatchPending;if FBusy then Exit;end;
   if (FPathCount>0) and (GetTickCount64>FPredUntil) then FPathCount:=0;
+  if (FExpedition<>'') and (FSnapshot<>nil) then FMap.Invalidate;
   if (FToken<>'') and (FSessionUntil>0) and (GetTickCount64+60000>=FSessionUntil) then begin
     Send('POST','auth/refresh','{}','refresh');Exit;
   end;
@@ -644,58 +733,50 @@ begin
 end;
 
 procedure TGameForm.Action(const ActionName, Direction: string);
-var D, P: TJSONObject; W, Enemies, E: TJSONData; I, X, Y, Distance, BestDistance: Integer; Target, CommandId: string; Sent: Boolean;
+var D, P: TJSONObject; W, Players, E: TJSONData; I, Distance, BestDistance, Range: Integer; Target, CommandId, Kind: string; Sent: Boolean;
 begin
   if FSmoke then Inc(FSmokeActions);
   if (FExpedition='') or (FSnapshot=nil) then Exit;
   if FSnapshot.FindPath('lobby').AsBoolean then begin
     FStatus.Caption:='Сначала нажмите «Начать» — сейчас группа ещё в подготовке.'; Exit;
   end;
+  if ActionName='move' then FFacing:=Direction;
   W:=FSnapshot.FindPath('world');
   if FBusy or FWsInFlight or not CanAct then begin
     FPendingAction:=ActionName; FPendingDirection:=Direction; Exit;
   end;
   P:=TJSONObject.Create(['action',ActionName]);
   if ActionName='revive' then begin
-    Enemies:=W.FindPath('players');Target:='';
-    for I:=0 to Enemies.Count-1 do begin E:=Enemies.Items[I];
+    Players:=W.FindPath('players');Target:='';
+    for I:=0 to Players.Count-1 do begin E:=Players.Items[I];
       if (JInt(E,'hp')=0) and (Abs(JInt(E,'x')-JInt(W,'self.x'))+Abs(JInt(E,'y')-JInt(W,'self.y'))<=1) then begin Target:=JStr(E,'id');Break;end;
     end;
     if Target='' then begin P.Free;FStatus.Caption:='Рядом нет павшего союзника.';Exit;end;P.Add('target_id',Target);
   end;
   if ActionName='cast' then begin
-    P.Add('spell_id',Direction);
+    P.Add('spell_id',Direction);Kind:='';
+    if FSheet<>nil then begin Kind:=JStr(FSheet,'spells.'+Direction+'.kind');Range:=JInt(FSheet,'spells.'+Direction+'.range',6);end else Range:=6;
     if (Direction='mend') and (JStr(W,'self.class_id')='warden') then begin
-      Enemies:=W.FindPath('players');Target:=FHero;BestDistance:=101;
-      for I:=0 to Enemies.Count-1 do begin E:=Enemies.Items[I];
+      Players:=W.FindPath('players');Target:=FHero;BestDistance:=101;
+      for I:=0 to Players.Count-1 do begin E:=Players.Items[I];
         if (JInt(E,'hp')>0) and (Abs(JInt(E,'x')-JInt(W,'self.x'))+Abs(JInt(E,'y')-JInt(W,'self.y'))<=3) then begin
           Distance:=JInt(E,'hp')*100 div JInt(E,'max_hp',100);
           if Distance<BestDistance then begin BestDistance:=Distance;Target:=JStr(E,'id');end;
         end;
       end;P.Add('target_id',Target);
     end;
-    if (Direction='firebolt') or (Direction='frost') or (Direction='venom') or (Direction='meteor') then begin
-      Enemies:=W.FindPath('enemies');Target:='';BestDistance:=1000;
-      for I:=0 to Enemies.Count-1 do begin
-        E:=Enemies.Items[I];Distance:=Abs(JInt(E,'x')-JInt(W,'self.x'))+Abs(JInt(E,'y')-JInt(W,'self.y'));
-        if Distance<BestDistance then begin BestDistance:=Distance;Target:=JStr(E,'id');end;
-      end;
-      P.Add('target_id',Target);
+    // Aimed spells hit the chosen target; line spells and the blink follow the hero's facing.
+    if (Kind='bolt') or (Kind='meteor') or (Kind='drain') or (Kind='chain') then begin
+      Target:=PickTarget(W,Range,False);
+      if (Target='') and (Kind<>'chain') then begin P.Free;FStatus.Caption:='Нет цели в радиусе заклинания ('+IntToStr(Range)+').';Exit;end;
+      if Target<>'' then P.Add('target_id',Target);
     end;
+    if (Kind='wave') or (Kind='blink') then P.Add('direction',FFacing);
   end else if Direction<>'' then P.Add('direction',Direction);
   if (ActionName='attack') or (ActionName='bash') then begin
-    W:=FSnapshot.FindPath('world'); X:=W.FindPath('self.x').AsInteger; Y:=W.FindPath('self.y').AsInteger;
-    Enemies:=W.FindPath('enemies'); Target:='';
-    for I:=0 to Enemies.Count-1 do begin
-      E:=Enemies.Items[I];
-      if Abs(E.FindPath('x').AsInteger-X)+Abs(E.FindPath('y').AsInteger-Y)=1 then begin Target:=E.FindPath('id').AsString; Break; end;
-    end;
-    if (Target='') and (ActionName='attack') and (JStr(W,'self.class_id')='ranger') then begin
-      BestDistance:=6;
-      for I:=0 to Enemies.Count-1 do begin E:=Enemies.Items[I];Distance:=Abs(JInt(E,'x')-X)+Abs(JInt(E,'y')-Y);
-        if Distance<BestDistance then begin BestDistance:=Distance;Target:=JStr(E,'id');end;end;
-    end;
-    if Target='' then begin P.Free; FStatus.Caption:='Нет противника в радиусе атаки.'; Exit; end;
+    if (ActionName='attack') and (JStr(W,'self.class_id')='ranger') then Target:=PickTarget(W,5,False)
+    else Target:=PickTarget(W,1,True);
+    if Target='' then begin P.Free; FStatus.Caption:='Нет противника в радиусе атаки. Подойдите вплотную или выберите цель.'; Exit; end;
     P.Add('target_id',Target);
   end;
   CommandId:=NewCommandId;
@@ -728,6 +809,8 @@ begin
     VK_3: Action('potion',''); VK_E: Action('descend',''); VK_X: Action('extract','');
     VK_4: Action('cast','firebolt');VK_5: Action('cast','mend');VK_6: Action('cast','frost');VK_7: Action('cast','nova');
     VK_8: Action('cast','venom');VK_9: Action('cast','chain');VK_0: Action('cast','barrier');VK_Q: Action('cast','meteor');
+    VK_Z: Action('cast','blink');VK_C: Action('cast','fire_wave');VK_V: Action('cast','whirlwind');VK_G: Action('cast','drain_life');
+    VK_TAB: CycleTarget;
     VK_F: Action('interact','');
     VK_T:ButtonClick(FindComponent('TownButton'));
     VK_R:Action('revive','');
@@ -736,5 +819,8 @@ begin
 end;
 
 procedure TGameForm.Draw(Sender:TObject);
-begin RenderMap(FMap,FSnapshot,FHero,FExpedition); end;
+begin
+  FView.Hero:=FHero;FView.Expedition:=FExpedition;FView.Target:=FTarget;FView.Sheet:=FSheet;FView.EstTick:=EstimatedTick;
+  RenderMap(FMap,FSnapshot,FView);
+end;
 end.

@@ -2,12 +2,17 @@ unit GameArt;
 {$mode objfpc}{$H+}{$codepage utf8}
 interface
 uses Graphics,Types,SysUtils,Math;
-procedure Stone(C:TCanvas;X,Y,S,Variation:Integer;Wall:Boolean;const Biome:string);
+procedure Stone(C:TCanvas;X,Y,S,Variation:Integer;Wall:Boolean;const Biome:string;Dim:Boolean=False);
 procedure Figure(C:TCanvas;X,Y,S:Integer;const Kind:string;Ally,SelfHero:Boolean;HP:Integer);
 procedure TownScene(C:TCanvas;W,H:Integer);
 procedure Frame(C:TCanvas;const R:TRect);
 procedure EnemyMarks(C:TCanvas;X,Y,S,HP,MaxHP:Integer;Elite,Boss:Boolean);
 procedure DungeonObject(C:TCanvas;X,Y,S:Integer;const Kind:string;Used:Boolean);
+function TierColor(Tier:Integer;UniqueItem:Boolean):TColor;
+procedure ItemIcon(C:TCanvas;X,Y,S:Integer;const Icon:string;Tier:Integer;UniqueItem:Boolean);
+procedure SpellIcon(C:TCanvas;X,Y,S:Integer;const Key:string);
+{ Spec: 'i|icon|tier|unique' for gear, 's|key' for skills, '' for plain text. }
+procedure DrawIconRow(C:TCanvas;const R:TRect;const Text,Spec:string;Selected:Boolean);
 implementation
 procedure Fill(C:TCanvas;X,Y,W,H:Integer;Color:TColor);
 begin C.Brush.Style:=bsSolid;C.Brush.Color:=Color;C.FillRect(Rect(X,Y,X+W,Y+H));end;
@@ -16,7 +21,9 @@ begin
   C.Brush.Style:=bsClear;C.Pen.Color:=$006A8794;C.Rectangle(R);
   C.Pen.Color:=$002E3E49;C.Rectangle(R.Left+2,R.Top+2,R.Right-2,R.Bottom-2);C.Brush.Style:=bsSolid;
 end;
-procedure Stone(C:TCanvas;X,Y,S,Variation:Integer;Wall:Boolean;const Biome:string);
+function Darken(Color:TColor):TColor;
+begin Result:=(Color and $00FCFCFC) shr 2;end;
+procedure Stone(C:TCanvas;X,Y,S,Variation:Integer;Wall:Boolean;const Biome:string;Dim:Boolean);
 var Base,Light,Dark:TColor;I:Integer;
 begin
   if Biome='monastery' then begin Base:=$004B454E;Light:=$006D6374;Dark:=$00322A39;end
@@ -25,6 +32,8 @@ begin
   else if Biome='glacier' then begin Base:=$00806A50;Light:=$00C8B090;Dark:=$00503E2C;end
   else if Biome='citadel' then begin Base:=$00283A5C;Light:=$003060A0;Dark:=$00141C30;end
   else begin Base:=$004A4131;Light:=$0062533E;Dark:=$00342C20;end;
+  // Fog of war: explored but unseen cells keep their shape in a quarter of the light.
+  if Dim then begin Base:=Darken(Base);Light:=Darken(Light);Dark:=Darken(Dark);end;
   if Wall then begin
     Fill(C,X,Y,S,S,Dark);Fill(C,X+1,Y+1,S-2,S-5,Base);
     C.Pen.Color:=Light;C.MoveTo(X+1,Y+1);C.LineTo(X+S-2,Y+1);C.MoveTo(X+1,Y+S div 2);C.LineTo(X+S-1,Y+S div 2);
@@ -135,6 +144,93 @@ begin
     for I:=0 to 3 do begin C.MoveTo(X+S div 5+I*S div 6,Y+S*3 div 4);C.LineTo(X+S div 5+I*S div 6+S div 12,Y+S div 2);C.LineTo(X+S div 5+I*S div 6+S div 6,Y+S*3 div 4);end;
   end;
   C.Brush.Style:=bsSolid;
+end;
+function TierColor(Tier:Integer;UniqueItem:Boolean):TColor;
+begin
+  if UniqueItem then Result:=$0030C0F0
+  else if Tier>=25 then Result:=$003030E0
+  else if Tier>=15 then Result:=$002090F0
+  else if Tier>=10 then Result:=$00D050B0
+  else if Tier>=6 then Result:=$00E09040
+  else if Tier>=3 then Result:=$0050C050
+  else Result:=$00B0B0B0;
+end;
+procedure Line(C:TCanvas;X1,Y1,X2,Y2,W:Integer;Color:TColor);
+begin C.Pen.Color:=Color;C.Pen.Width:=W;C.MoveTo(X1,Y1);C.LineTo(X2,Y2);C.Pen.Width:=1;end;
+procedure Disc(C:TCanvas;CX,CY,R:Integer;Color:TColor);
+begin C.Brush.Style:=bsSolid;C.Brush.Color:=Color;C.Pen.Color:=Color;C.Ellipse(CX-R,CY-R,CX+R+1,CY+R+1);end;
+procedure ItemIcon(C:TCanvas;X,Y,S:Integer;const Icon:string;Tier:Integer;UniqueItem:Boolean);
+const Wood=$00305A80;Leather=$00406890;Cloth=$00704868;
+var U,W:Integer;M:TColor;
+  function PX(N:Integer):Integer;begin Result:=X+N*U;end;
+  function PY(N:Integer):Integer;begin Result:=Y+N*U;end;
+begin
+  U:=Max(1,S div 12);W:=Max(1,U);M:=TierColor(Tier,UniqueItem);
+  Fill(C,X,Y,S,S,$00181B1D);C.Brush.Style:=bsClear;C.Pen.Color:=M;C.Rectangle(X,Y,X+S,Y+S);C.Brush.Style:=bsSolid;
+  case Icon of
+    'blade':begin Line(C,PX(3),PY(9),PX(9),PY(3),W*2,M);Line(C,PX(2),PY(7),PX(5),PY(10),W,Wood);Line(C,PX(2),PY(10),PX(3),PY(9),W*2,Wood);end;
+    'dagger':begin Line(C,PX(4),PY(8),PX(8),PY(4),W*2,M);Line(C,PX(3),PY(7),PX(5),PY(9),W,Wood);Line(C,PX(3),PY(9),PX(4),PY(8),W*2,Wood);end;
+    'axe':begin Line(C,PX(3),PY(10),PX(8),PY(3),W,Wood);C.Brush.Color:=M;C.Pen.Color:=M;C.Pie(PX(6),PY(1),PX(11),PY(6),PX(11),PY(1),PX(6),PY(6));end;
+    'hammer':begin Line(C,PX(6),PY(4),PX(6),PY(11),W,Wood);Fill(C,PX(3),PY(1),6*U,3*U,M);end;
+    'mace':begin Line(C,PX(4),PY(10),PX(7),PY(5),W,Wood);Disc(C,PX(8),PY(4),2*U,M);Fill(C,PX(10),PY(4),U,U,M);Fill(C,PX(8),PY(1),U,U,M);end;
+    'staff':begin Line(C,PX(4),PY(11),PX(8),PY(3),W,Wood);Disc(C,PX(8),PY(3),U+U div 2,M);end;
+    'wand':begin Line(C,PX(4),PY(9),PX(7),PY(5),W,Wood);Fill(C,PX(7),PY(2),U,4*U,M);Fill(C,PX(6),PY(3),3*U,U,M);end;
+    'bow':begin C.Pen.Color:=Wood;C.Pen.Width:=W;C.Brush.Style:=bsClear;C.Arc(PX(2),PY(1),PX(9),PY(11),90*16,180*16);C.Brush.Style:=bsSolid;C.Pen.Width:=1;Line(C,PX(5),PY(1),PX(5),PY(11),1,M);end;
+    'crossbow':begin Line(C,PX(2),PY(4),PX(10),PY(4),W,M);Line(C,PX(6),PY(3),PX(6),PY(11),W,Wood);Line(C,PX(2),PY(4),PX(6),PY(7),1,$00C0C0C0);Line(C,PX(10),PY(4),PX(6),PY(7),1,$00C0C0C0);end;
+    'robe':begin C.Brush.Color:=Cloth;C.Pen.Color:=M;C.Polygon([Point(PX(4),PY(2)),Point(PX(8),PY(2)),Point(PX(10),PY(11)),Point(PX(2),PY(11))]);Fill(C,PX(5),PY(2),2*U,U,M);end;
+    'jerkin':begin Fill(C,PX(3),PY(2),6*U,9*U,Leather);Fill(C,PX(3),PY(7),6*U,U,M);Fill(C,PX(1),PY(3),2*U,4*U,Leather);Fill(C,PX(9),PY(3),2*U,4*U,Leather);end;
+    'mail':begin Fill(C,PX(3),PY(2),6*U,9*U,$00707070);for W:=1 to 4 do Fill(C,PX(3)+W*U,PY(3)+(W mod 2)*2*U,U,U,M);Fill(C,PX(1),PY(3),2*U,4*U,$00606060);Fill(C,PX(9),PY(3),2*U,4*U,$00606060);end;
+    'plate':begin Fill(C,PX(3),PY(2),6*U,9*U,M);Line(C,PX(3),PY(5),PX(9),PY(5),1,$00303030);Line(C,PX(3),PY(8),PX(9),PY(8),1,$00303030);Fill(C,PX(1),PY(2),2*U,3*U,M);Fill(C,PX(9),PY(2),2*U,3*U,M);end;
+    'shield':begin C.Brush.Color:=$00506070;C.Pen.Color:=M;C.Polygon([Point(PX(2),PY(2)),Point(PX(10),PY(2)),Point(PX(10),PY(6)),Point(PX(6),PY(11)),Point(PX(2),PY(6))]);Fill(C,PX(5),PY(3),2*U,5*U,M);end;
+    'tome':begin Fill(C,PX(2),PY(2),8*U,9*U,$00304090);Fill(C,PX(3),PY(3),6*U,7*U,$0090B0C0);Fill(C,PX(5),PY(5),2*U,2*U,M);end;
+    'orb':begin Disc(C,PX(6),PY(6),4*U,M);Disc(C,PX(5),PY(5),U,$00F0F0F0);end;
+    'quiver':begin Fill(C,PX(4),PY(4),4*U,7*U,Leather);for W:=0 to 2 do Line(C,PX(4)+W*U+U,PY(1),PX(4)+W*U+U,PY(4),1,M);end;
+    'ring':begin C.Brush.Style:=bsClear;C.Pen.Color:=M;C.Pen.Width:=W;C.Ellipse(PX(3),PY(4),PX(9),PY(10));C.Pen.Width:=1;C.Brush.Style:=bsSolid;Disc(C,PX(6),PY(3),U,$006060F0);end;
+    'signet':begin C.Brush.Style:=bsClear;C.Pen.Color:=M;C.Pen.Width:=W*2;C.Ellipse(PX(3),PY(4),PX(9),PY(10));C.Pen.Width:=1;C.Brush.Style:=bsSolid;Fill(C,PX(5),PY(2),2*U,2*U,M);end;
+    'amulet':begin Line(C,PX(2),PY(1),PX(6),PY(6),1,M);Line(C,PX(10),PY(1),PX(6),PY(6),1,M);Disc(C,PX(6),PY(8),2*U,M);Disc(C,PX(6),PY(8),U,$0040E060);end;
+    'talisman':begin Line(C,PX(2),PY(1),PX(6),PY(5),1,M);Line(C,PX(10),PY(1),PX(6),PY(5),1,M);C.Brush.Color:=M;C.Pen.Color:=M;C.Polygon([Point(PX(6),PY(5)),Point(PX(9),PY(8)),Point(PX(6),PY(11)),Point(PX(3),PY(8))]);end;
+  else Disc(C,PX(6),PY(6),3*U,M);end;
+  C.Brush.Style:=bsSolid;
+end;
+procedure SpellIcon(C:TCanvas;X,Y,S:Integer;const Key:string);
+var U:Integer;
+  function PX(N:Integer):Integer;begin Result:=X+N*U;end;
+  function PY(N:Integer):Integer;begin Result:=Y+N*U;end;
+begin
+  U:=Max(1,S div 12);Fill(C,X,Y,S,S,$00282420);C.Brush.Style:=bsClear;C.Pen.Color:=$00607080;C.Rectangle(X,Y,X+S,Y+S);C.Brush.Style:=bsSolid;
+  case Key of
+    'attack':begin Line(C,PX(3),PY(9),PX(9),PY(3),2*U,$00C0C0C0);Line(C,PX(2),PY(7),PX(5),PY(10),U,$00305A80);end;
+    'bash':begin C.Brush.Color:=$00506070;C.Pen.Color:=$00C0C0C0;C.Polygon([Point(PX(2),PY(2)),Point(PX(9),PY(2)),Point(PX(9),PY(6)),Point(PX(5),PY(10)),Point(PX(2),PY(6))]);Line(C,PX(8),PY(8),PX(11),PY(11),U,$0020A0F0);end;
+    'guard':begin C.Brush.Color:=$00A06030;C.Pen.Color:=$00F0C080;C.Polygon([Point(PX(2),PY(2)),Point(PX(10),PY(2)),Point(PX(10),PY(6)),Point(PX(6),PY(11)),Point(PX(2),PY(6))]);end;
+    'potion':begin Fill(C,PX(5),PY(1),2*U,3*U,$00A0A0A0);Disc(C,PX(6),PY(7),3*U,$002020C0);Fill(C,PX(5),PY(5),U,U,$008080FF);end;
+    'firebolt':begin Line(C,PX(2),PY(10),PX(6),PY(6),U,$000060D0);Disc(C,PX(7),PY(5),2*U,$0000A0FF);Disc(C,PX(7),PY(5),U,$0080E0FF);end;
+    'mend':begin Fill(C,PX(5),PY(2),2*U,8*U,$0040D040);Fill(C,PX(2),PY(5),8*U,2*U,$0040D040);end;
+    'frost':begin C.Brush.Color:=$00F0D090;C.Pen.Color:=$00FFF0D0;C.Polygon([Point(PX(6),PY(1)),Point(PX(8),PY(6)),Point(PX(6),PY(11)),Point(PX(4),PY(6))]);end;
+    'nova':begin C.Brush.Style:=bsClear;C.Pen.Color:=$0000A0FF;C.Pen.Width:=U;C.Ellipse(PX(2),PY(2),PX(10),PY(10));C.Pen.Width:=1;C.Brush.Style:=bsSolid;Disc(C,PX(6),PY(6),U,$0080E0FF);end;
+    'venom':begin C.Brush.Color:=$0030B040;C.Pen.Color:=$0030B040;C.Polygon([Point(PX(6),PY(1)),Point(PX(9),PY(7)),Point(PX(3),PY(7))]);Disc(C,PX(6),PY(8),3*U,$0030B040);end;
+    'chain':begin C.Pen.Color:=$0040F0F0;C.Pen.Width:=U;C.MoveTo(PX(7),PY(1));C.LineTo(PX(4),PY(6));C.LineTo(PX(8),PY(6));C.LineTo(PX(5),PY(11));C.Pen.Width:=1;end;
+    'barrier':begin C.Brush.Style:=bsClear;C.Pen.Color:=$00FFC060;C.Pen.Width:=U;C.Ellipse(PX(1),PY(1),PX(11),PY(11));C.Pen.Width:=1;C.Brush.Style:=bsSolid;Fill(C,PX(5),PY(4),2*U,4*U,$00FFC060);end;
+    'meteor':begin Line(C,PX(10),PY(1),PX(6),PY(5),2*U,$000040E0);Disc(C,PX(5),PY(7),3*U,$00304050);Disc(C,PX(4),PY(6),U,$0000A0FF);end;
+    'whirlwind':begin C.Pen.Color:=$00D0D0D0;C.Pen.Width:=U;C.Brush.Style:=bsClear;C.Arc(PX(1),PY(1),PX(11),PY(11),0,270*16);C.Arc(PX(3),PY(3),PX(9),PY(9),180*16,270*16);C.Pen.Width:=1;C.Brush.Style:=bsSolid;end;
+    'blink':begin Line(C,PX(2),PY(6),PX(9),PY(6),U,$00F060C0);C.Brush.Color:=$00F060C0;C.Pen.Color:=$00F060C0;C.Polygon([Point(PX(8),PY(3)),Point(PX(11),PY(6)),Point(PX(8),PY(9))]);Fill(C,PX(2),PY(3),U,U,$00FFC0F0);Fill(C,PX(3),PY(9),U,U,$00FFC0F0);end;
+    'fire_wave':begin C.Pen.Width:=U;C.Brush.Style:=bsClear;C.Pen.Color:=$0000A0FF;C.Arc(PX(1),PY(2),PX(7),PY(10),270*16,180*16);C.Pen.Color:=$000060E0;C.Arc(PX(4),PY(2),PX(10),PY(10),270*16,180*16);C.Pen.Width:=1;C.Brush.Style:=bsSolid;end;
+    'drain_life':begin Disc(C,PX(4),PY(7),3*U,$002020B0);Line(C,PX(6),PY(4),PX(10),PY(1),U,$006060FF);Fill(C,PX(9),PY(1),2*U,U,$006060FF);end;
+  else Disc(C,PX(6),PY(6),3*U,$00808080);end;
+  C.Brush.Style:=bsSolid;
+end;
+procedure DrawIconRow(C:TCanvas;const R:TRect;const Text,Spec:string;Selected:Boolean);
+var Parts:TStringArray;S,TX:Integer;
+begin
+  if Selected then C.Brush.Color:=$00604830 else C.Brush.Color:=$00202A32;
+  C.FillRect(R);S:=R.Bottom-R.Top-4;TX:=R.Left+4;
+  if Spec<>'' then begin
+    Parts:=Spec.Split('|');
+    if (Parts[0]='i') and (Length(Parts)>=4) then ItemIcon(C,R.Left+2,R.Top+2,S,Parts[1],StrToIntDef(Parts[2],1),Parts[3]='1')
+    else if (Parts[0]='s') and (Length(Parts)>=2) then SpellIcon(C,R.Left+2,R.Top+2,S,Parts[1]);
+    TX:=R.Left+S+8;
+    if (Parts[0]='i') and (Length(Parts)>=4) then C.Font.Color:=TierColor(StrToIntDef(Parts[2],1),Parts[3]='1') else C.Font.Color:=$0082C1DD;
+  end else C.Font.Color:=$0082C1DD;
+  C.Brush.Style:=bsClear;C.TextOut(TX,R.Top+(R.Bottom-R.Top-C.TextHeight('Ag')) div 2,Text);C.Brush.Style:=bsSolid;
 end;
 procedure TownScene(C:TCanvas;W,H:Integer);
 var B:TBitmap;P:TCanvas;I,X,Y:Integer;

@@ -23,6 +23,7 @@ final class Replay {
                 } elseif($event->kind==='leave') {
                     foreach($s['players'] as $pid=>&$player) if($player['outcome']===null&&(($p['cancel_lobby']??false)||$pid===$p['character_id'])) $player['outcome']='abandoned';
                     unset($player);
+                    $s=Game::resolveDuel($s);
                     if(!array_filter($s['players'],fn($x)=>$x['outcome']===null)) $s['status']='completed';
                 } else throw new RuntimeException('Unknown event kind');
                 if(!hash_equals($event->state_hash,hash('sha256',Canonical::json($s)))) throw new RuntimeException('Replay mismatch at revision '.$revision);

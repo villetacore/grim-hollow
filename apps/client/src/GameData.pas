@@ -7,7 +7,7 @@ function JInt(D:TJSONData; const Path:string; DefaultValue:Integer=0):Integer;
 function JBool(D:TJSONData; const Path:string):Boolean;
 function ItemSummary(D:TJSONData):string;
 function SpellKey(Index:Integer):string;
-const SpellCount=8;
+const SpellCount=12;
 function FriendlyError(const Code:string):string;
 function GameWord(const Code:string):string;
 implementation
@@ -19,7 +19,7 @@ begin
     'guardian':Result:='Страж';'arcanist':Result:='Арканист';'ranger':Result:='Следопыт';'warden':Result:='Хранитель';
     'weapon':Result:='оружие';'body':Result:='доспех';'offhand':Result:='щит';'ring':Result:='кольцо';'amulet':Result:='амулет';
     'chest':Result:='сундук';'fountain':Result:='родник';'shrine':Result:='алтарь ярости';'trap':Result:='ловушка';
-    'distill':Result:='Перегонка эссенции';'bounty':Result:='Награда за контракт';
+    'distill':Result:='Перегонка эссенции';'forge':Result:='Ковка';'upgrade':Result:='Улучшение';'enchant':Result:='Зачарование';'bounty':Result:='Награда за контракт';
     'salvage':Result:='Разбор';'craft':Result:='Изготовление';'supply':Result:='Запас зелий';
     'market_list':Result:='Выставлен лот';'market_cancel':Result:='Лот снят';'market_buy':Result:='Покупка';
     'market_sale':Result:='Продажа игроку';'expedition':Result:='Итоги похода';'npc_sale':Result:='Продажа торговцу';
@@ -52,6 +52,11 @@ begin
   else if Pos('invitation_required',Code)>0 then Result:='Нужно входящее приглашение от этого игрока или гильдии.'
   else if Pos('already_in_guild',Code)>0 then Result:='Персонаж уже состоит в гильдии.'
   else if Pos('leader_only',Code)>0 then Result:='Приглашать участников может глава гильдии.'
+  else if Pos('skill_cooldown',Code)>0 then Result:='Умение ещё перезаряжается — смотрите панель под картой.'
+  else if Pos('not_in_duel',Code)>0 then Result:='На арене это действие недоступно.'
+  else if Pos('need_opponent',Code)>0 then Result:='Для дуэли нужен второй игрок: передайте ему код группы.'
+  else if Pos('forge_limit',Code)>0 then Result:='Кузнец пока не умеет ковать такой уровень: растите в уровне или спускайтесь глубже.'
+  else if Pos('unique_item',Code)>0 then Result:='Именные вещи нельзя улучшать или зачаровывать.'
   else if Pos('no_object',Code)>0 then Result:='Рядом нет сундука, родника или алтаря. Встаньте вплотную.'
   else if Pos('bounty_active',Code)>0 then Result:='Сначала выполните или откажитесь от текущего контракта.'
   else if Pos('bounty_incomplete',Code)>0 then Result:='Контракт ещё не выполнен: победите нужных врагов и эвакуируйтесь.'
@@ -85,12 +90,15 @@ begin
     'Урон +'+JStr(D,'damage')+'   Броня +'+JStr(D,'armor')+'   Магия +'+JStr(D,'power');
   if JInt(D,'hp')>0 then Result:=Result+'   HP +'+JStr(D,'hp');
   if JInt(D,'mana')>0 then Result:=Result+'   MP +'+JStr(D,'mana');
+  if JInt(D,'crit')>0 then Result:=Result+'   Крит '+JStr(D,'crit')+'%';
+  if JInt(D,'leech')>0 then Result:=Result+'   Вампиризм '+JStr(D,'leech')+'%';
   Result:=Result+LineEnding+
     'Продажа: '+JStr(D,'price')+' крон. Слот: '+GameWord(JStr(D,'slot'));
 end;
 function SpellKey(Index:Integer):string;
 begin
   case Index of 0:Result:='firebolt';1:Result:='mend';2:Result:='frost';3:Result:='nova';
-    4:Result:='venom';5:Result:='chain';6:Result:='barrier';7:Result:='meteor';else Result:='';end;
+    4:Result:='venom';5:Result:='chain';6:Result:='barrier';7:Result:='meteor';
+    8:Result:='blink';9:Result:='fire_wave';10:Result:='whirlwind';11:Result:='drain_life';else Result:='';end;
 end;
 end.

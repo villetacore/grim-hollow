@@ -74,9 +74,9 @@ final class GameController
 
     public function expedition(Request $r, World $world)
     {
-        $d = $r->validate(['character_id' => 'required|ulid', 'join_code' => 'nullable|string|size:10','biome'=>'sometimes|in:'.implode(',',array_keys(\GrimHollow\Core\Catalog::biomes()))]);
+        $d = $r->validate(['character_id' => 'required|ulid', 'join_code' => 'nullable|string|size:10','biome'=>'sometimes|in:'.implode(',',array_keys(\GrimHollow\Core\Catalog::biomes())),'mode'=>'sometimes|in:expedition,duel']);
         $c = $world->character($r->attributes->get('account_id'), $d['character_id']);
-        $e = empty($d['join_code']) ? $world->create($c,$d['biome']??'mines') : $world->join($c, $d['join_code']);
+        $e = empty($d['join_code']) ? $world->create($c,$d['biome']??'mines',$d['mode']??'expedition') : $world->join($c, $d['join_code']);
 
         return ['id' => $e->id, 'join_code' => $e->join_code, 'status' => $e->status];
     }
