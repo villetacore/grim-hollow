@@ -11,7 +11,8 @@ token=(await api('auth/register',{email:`rpg${suffix}@example.test`,password:ran
 const mage=await api('characters',{name:'Mage'+suffix,class_id:'arcanist'},201);
 const guard=await api('characters',{name:'Guard'+suffix},201);
 assert.equal((await api('characters')).items.length,2);
-let sheet=await api('characters/'+mage.id);assert.equal(sheet.items.length,4);assert.equal(sheet.stats.max_mana,100);
+let sheet=await api('characters/'+mage.id);assert.equal(sheet.items.length,4);// 100 arcanist mana + 10 from the default human origin.
+assert.equal(sheet.stats.max_mana,110);
 const ring=sheet.items.find(x=>x.definition==='ember_ring');
 const equip={operation_id:randomUUID(),action:'equip',item_id:ring.id};
 sheet=await api(`characters/${mage.id}/manage`,equip);assert.equal(sheet.stats.power,8);
