@@ -6,7 +6,7 @@
  */
 declare(strict_types=1);
 
-use GrimHollow\Core\{Catalog, Dungeon, Game};
+use GrimHollow\Core\{Catalog, Dungeon, Game, Plaza};
 
 require __DIR__.'/../../apps/server/vendor/autoload.php';
 $out = rtrim($argv[1] ?? 'build/screenshots', '/\\');
@@ -124,3 +124,21 @@ $s = Game::command($s, 'ally', ['action' => 'attack', 'target_id' => 'hero']);
 $s = Game::command($s, 'hero', ['action' => 'cast', 'spell_id' => 'firebolt', 'target_id' => 'ally']);
 for ($i = 0; $i < 6; $i++) $s = Game::tick($s);
 save("$out/duel.json", $s, 'ally', Game::view($s, 'hero')['map']);
+
+// 4. The town square: heroes of different builds, keepers and walkers, a chat bubble and an emote.
+$now = 1000000000;
+$hero = fn ($id, $name, $class, $origin, $level, $x, $y, $extra = []) => $extra + ['id' => $id, 'name' => $name, 'class_id' => $class,
+    'origin' => $origin, 'level' => $level, 'x' => $x, 'y' => $y, 'facing' => 'south', 'emote' => null, 'bubble' => null];
+$npcs = array_map(fn ($n) => array_intersect_key($n, array_flip(['id', 'name', 'kind', 'service', 'x', 'y'])), Plaza::npcs());
+$players = [
+    $hero('p1', 'Мирель', 'druid', 'elf', 23, 24, 15, ['bubble' => 'Кто со мной в Гнилую топь? Нужен лекарь!']),
+    $hero('p2', 'Грок', 'berserker', 'orc', 31, 30, 14, ['emote' => 'cheer']),
+    $hero('p3', 'Тень', 'assassin', 'undead', 18, 22, 19),
+    $hero('p4', 'Ольга', 'warden', 'dwarf', 27, 33, 18, ['emote' => 'dance']),
+    $hero('p5', 'Каэль', 'necromancer', 'drakeborn', 40, 20, 12),
+];
+$view = ['v' => 1, 'type' => 'plaza', 'now' => (string) $now, 'online' => 6, 'self' => $hero('me', 'Ардан', 'guardian', 'human', 12, 26, 15),
+    'players' => $players, 'npcs' => array_merge($npcs, Plaza::walkersAt($now))];
+file_put_contents("$out/plaza.json", json_encode(['town' => ['width' => Plaza::WIDTH, 'height' => Plaza::HEIGHT, 'map' => Plaza::map(),
+    'buildings' => Plaza::buildings()], 'plaza' => $view, 'hero' => 'me',
+    'talk' => 'Наставница Кайра: Страж с наставником-убийцей? Почему бы и нет. Восемь классов — шестьдесят четыре пути.'], JSON_UNESCAPED_UNICODE));

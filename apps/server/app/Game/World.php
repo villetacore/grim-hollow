@@ -48,7 +48,7 @@ final class World
             $id = (string) Str::ulid();
             abort_unless(isset(Catalog::biomes()[$biome]) && ($mode==='duel' || $c->campaign>=Catalog::biomes()[$biome]['chapter']),409,'biome_locked');
             $characters=new Characters; $characters->starter($c);
-            $state = Game::create(random_int(1, 2000000000), [$c->id => $characters->profile($c)],$biome,$mode);
+            $state = Game::create(random_int(1, 2000000000), [$c->id => $characters->profile($c,$mode!=='duel')],$biome,$mode);
             DB::table('expeditions')->insert(['id' => $id, 'host_id' => $c->id, 'join_code' => strtoupper(Str::random(10)),
                 'status' => 'lobby', 'state' => json_encode($state), 'created_at' => now(), 'updated_at' => now()]);
             DB::table('expedition_members')->insert(['expedition_id' => $id, 'character_id' => $c->id, 'last_seen' => self::milliseconds()]);
@@ -72,11 +72,11 @@ final class World
             abort_if(DB::table('settlements')->where('expedition_id',$e->id)->where('character_id',$c->id)->exists(),409,'already_left');
             $state = json_decode($e->state, true, 512, JSON_THROW_ON_ERROR);
             $mode = $state['mode'] ?? 'expedition';
-            abort_if(count($state['players']) >= ($mode === 'duel' ? 2 : 4), 409, 'party_full');
+            abort_if(count($state['players']) >= ($mode === 'duel' ? 2 : Game::MAX_PARTY), 409, 'party_full');
             abort_unless($mode==='duel' || $c->campaign>=Catalog::biomes()[$state['biome']??'mines']['chapter'],409,'biome_locked');
-            $names = array_map(static fn ($p) => array_intersect_key($p,array_flip(['name','class_id','level','max_hp','max_mana','damage_bonus','armor','power','equipment','potions'])), $state['players']);
+            $names = array_map(static fn ($p) => array_intersect_key($p,array_flip(Game::PROFILE_KEYS)), $state['players']);
             $characters=new Characters; $characters->starter($c);
-            $names[$c->id] = $characters->profile($c);
+            $names[$c->id] = $characters->profile($c,$mode!=='duel');
             $state = Game::create($state['seed'], $names,$state['biome']??'mines',$mode);
             // Bump the revision so open world streams notice the new member.
             DB::table('expeditions')->where('id', $e->id)->update(['state' => json_encode($state), 'revision' => $e->revision + 1]);
@@ -334,8 +334,13 @@ final class World
             if ($won && $c->campaign===$chapter) { $gold+=50*($chapter+1);$xp+=40*($chapter+1); }
             DB::table('settlements')->insert(['expedition_id' => $e->id, 'character_id' => $id, 'outcome' => $p['outcome'],
                 'gold' => $gold, 'xp' => $xp, 'created_at' => now(), 'updated_at' => now()]);
+            // The elixir lasts one expedition whatever its end; reagents come home only with the hero.
+            $reagents = Characters::reagents($c);
+            if ($extracted) foreach ($p['reagents'] ?? [] as $key => $n) $reagents[$key] = ($reagents[$key] ?? 0) + (int) $n;
+            ksort($reagents);
             $update = ['gold' => $c->gold + $gold, 'xp' => $c->xp + $xp, 'essence' => $c->essence + $essence, 'active_expedition' => null,
-                'best_depth' => max((int) $c->best_depth, $extracted ? $s['floor'] : $s['floor'] - 1)];
+                'best_depth' => max((int) $c->best_depth, $extracted ? $s['floor'] : $s['floor'] - 1),
+                'reagents' => $reagents ? json_encode($reagents) : null, 'elixir' => null];
             // Bounty progress counts only for heroes who made it back to report.
             $bounty = $c->bounty ? json_decode($c->bounty, true) : null;
             if ($extracted && $bounty && isset($p['slain'][$bounty['type']])) {

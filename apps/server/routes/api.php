@@ -4,6 +4,7 @@ use App\Http\Controllers\GameController;
 use App\Http\Controllers\RpgController;
 use App\Http\Controllers\TownController;
 use App\Http\Controllers\ModerationController;
+use App\Http\Controllers\PlazaController;
 use App\Http\Middleware\GameSession;
 use Illuminate\Support\Facades\Route;
 
@@ -18,6 +19,8 @@ Route::prefix('v1')->group(function () {
         Route::get('characters/{id}/town', [TownController::class, 'show']);
         Route::post('characters/{id}/town', [TownController::class, 'act'])->middleware('throttle:60,1,town:');
         Route::post('characters/{id}/manage', [RpgController::class, 'manage']);
+        Route::get('characters/{id}/plaza', [PlazaController::class, 'show']);
+        Route::post('characters/{id}/plaza', [PlazaController::class, 'act'])->middleware('throttle:900,1,plaza:');
         Route::get('chat', [RpgController::class, 'chat']);
         Route::post('chat/reports', [ModerationController::class, 'report'])->middleware('throttle:10,1,reports:');
         Route::get('admin/reports', [ModerationController::class, 'index']);

@@ -27,9 +27,25 @@ final class ContentTest extends TestCase
         self::assertSame(range(0,count($chapters)-1),$chapters);
         foreach (Catalog::recipes() as $key=>$r) self::assertArrayHasKey($key,$items);
         foreach ($enemies as $key=>$e) if (in_array('summon',$e['specials']??[],true)) self::assertArrayHasKey($e['summon'],$enemies,$key);
-        foreach (Catalog::talents() as $t) self::assertContains($t['stat'],['armor','damage_bonus','max_mana','power','max_hp']);
-        foreach ($items as $item) self::assertContains($item['slot'],['weapon','body','offhand','ring','amulet']);
-        self::assertCount(12,Catalog::spells());
+        foreach (Catalog::talents() as $t) {
+            self::assertContains($t['stat'],['armor','damage_bonus','max_mana','power','max_hp','crit','leech','thorns','regen']);
+            self::assertArrayHasKey($t['class'],Catalog::classes());
+        }
+        foreach ($items as $item) self::assertContains($item['slot'],Catalog::SLOTS);
+        foreach (Catalog::bases() as $base) self::assertContains($base['slot'],Catalog::SLOTS);
+        foreach (Catalog::classes() as $key=>$class) {
+            self::assertArrayHasKey($class['weapon'],$items,$key);
+            foreach ($class['bases'] as $base) self::assertArrayHasKey($base,Catalog::bases(),$key);
+            foreach ($class['traits'] as $trait) self::assertArrayHasKey($trait,Catalog::traits(),$key);
+            foreach ($class['schools'] as $school) self::assertArrayHasKey($school,Catalog::schools(),$key);
+        }
+        foreach (Catalog::spells() as $key=>$spell) self::assertArrayHasKey($spell['school'],Catalog::schools(),$key);
+        foreach (Catalog::BOSSES as $boss) self::assertTrue($enemies[$boss]['boss']??false,$boss);
+        foreach ($enemies as $key=>$e) foreach ($e['specials']??[] as $special) self::assertArrayHasKey($special,Catalog::specials(),$key);
+        foreach (Catalog::enemyAffixes() as $a) foreach ($a['specials']??[] as $special) self::assertArrayHasKey($special,Catalog::specials());
+        foreach (Catalog::materials() as $m) foreach ($m['cost'] as $reagent=>$n) self::assertArrayHasKey($reagent,Catalog::reagents());
+        foreach (Catalog::runes() as $r) self::assertArrayHasKey($r['cost'],Catalog::reagents());
+        self::assertCount(16,Catalog::spells());
     }
 
     public function test_every_area_generates_and_puts_its_boss_on_the_last_floor(): void

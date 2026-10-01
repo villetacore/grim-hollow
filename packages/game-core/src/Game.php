@@ -8,13 +8,23 @@ use DomainException;
 
 final class Game
 {
-    public const CONTENT_VERSION = 'campaign-005';
+    public const CONTENT_VERSION = 'campaign-006';
 
     /** A command that arrives this many ticks before the hero is ready is buffered, not rejected. */
     public const QUEUE_WINDOW = 3;
 
     /** Duels last at most three minutes; then both duelists draw. */
     public const DUEL_TICKS = 1800;
+
+    /** Largest party for an expedition. Monsters grow tougher and more numerous with every member. */
+    public const MAX_PARTY = 8;
+
+    /** Party members' start cells inside the first room (the first four match 0.5 layouts). */
+    public const SPAWNS = [[5, 5], [6, 5], [7, 5], [8, 5], [5, 6], [6, 6], [7, 6], [8, 6]];
+
+    /** Profile fields a lobby keeps for each member when the party is rebuilt on join. */
+    public const PROFILE_KEYS = ['name', 'class_id', 'origin', 'mentor', 'level', 'max_hp', 'max_mana', 'damage_bonus', 'armor', 'power',
+        'crit', 'leech', 'thorns', 'regen', 'greed', 'traits', 'schools', 'sets', 'elixir', 'equipment', 'potions'];
 
     private const MOVE_COOLDOWN = 2;
 
@@ -27,6 +37,7 @@ final class Game
     {
         if (!isset(Catalog::biomes()[$biome])) throw new DomainException('unknown_biome');
         if (!in_array($mode, ['expedition', 'duel'], true)) throw new DomainException('unknown_mode');
+        if (count($players) > self::MAX_PARTY) throw new DomainException('party_full');
         $state = ['version' => 1, 'content_version' => self::CONTENT_VERSION, 'seed' => $seed, 'mode' => $mode,
             'tick' => 0, 'floor' => 1, 'biome'=>$biome, 'shrine_charges'=>1, 'bosses_slain'=>0, 'status' => 'active', 'players' => [], 'log' => [], 'rng' => $seed];
         foreach ($players as $id => $name) {
@@ -41,6 +52,7 @@ final class Game
             $state['players'][$id]['spell_ready']=[];
             $state['players'][$id]['loot']=[];
             $state['players'][$id]['essence']=0;
+            $state['players'][$id]['reagents']=[];
             $state['players'][$id]['slain']=[];
             $state['players'][$id]['facing']='east';
         }
@@ -65,6 +77,12 @@ final class Game
         return ($s['party_level'] ?? 1) + $s['floor'] - 1;
     }
 
+    /** Whether a hero has a combat trait from class, mentor or origin (older snapshots fall back to the class). */
+    public static function has(array $p, string $trait): bool
+    {
+        return in_array($trait, $p['traits'] ?? [], true) || in_array($trait, Catalog::classes()[$p['class_id'] ?? '']['traits'] ?? [], true);
+    }
+
     private static function biome(array $s): array
     {
         return Catalog::biomes()[$s['biome'] ?? 'mines'];
@@ -76,6 +94,21 @@ final class Game
         $cycle = intdiv($s['floor'] - 1, $biome['floors']);
 
         return $cycle === 0 ? $biome['boss_type'] : Catalog::BOSSES[($biome['chapter'] + $cycle) % count(Catalog::BOSSES)];
+    }
+
+    /** Combined numeric effect of the current floor's omens. */
+    private static function omen(array $s, string $key): float
+    {
+        $sum = 0;
+        foreach ($s['omens'] ?? [] as $omen) $sum += Catalog::omens()[$omen][$key] ?? 0;
+
+        return $sum;
+    }
+
+    /** Fighters in the party; monsters scale with it. */
+    private static function partySize(array $s): int
+    {
+        return max(1, count($s['players']));
     }
 
     /** A pillared hall for two duelists. */
@@ -116,6 +149,14 @@ final class Game
         $s['floor_tick'] = $s['tick'];
         $rng = new Random($dungeon['rng']);
         $s['enemies'] = [];
+        // Omens from the second floor on: one often, a second one deeper down.
+        $s['omens'] = [];
+        if ($s['floor'] >= 2) {
+            $keys = array_keys(Catalog::omens());
+            if ($rng->next(1, 100) <= 40) $s['omens'][] = $keys[$rng->next(0, count($keys) - 1)];
+            if ($level >= 15 && $rng->next(1, 100) <= 25) $s['omens'][] = $keys[$rng->next(0, count($keys) - 1)];
+            $s['omens'] = array_values(array_unique($s['omens']));
+        }
         $cells = [];
         for ($y = 1; $y < 31; $y++) {
             for ($x = 1; $x < 31; $x++) {
@@ -133,7 +174,9 @@ final class Game
         }
         $roster = array_values(array_unique($roster));
         $healers = array_values(array_filter($roster, static fn ($t) => in_array('heal', Catalog::enemy($t)['specials'] ?? [], true)));
-        $budget = min(24, 5 + $s['floor'] + intdiv($level, 3));
+        $extra = self::partySize($s) - 1;
+        $budget = (int) round(min(24 + 2 * $extra, 5 + $s['floor'] + intdiv($level, 3) + 2 * $extra) * (1 + self::omen($s, 'budget')));
+        $chimeraChance = $level >= 8 ? (int) min(60, intdiv($level, 2) * (1 + self::omen($s, 'chimera'))) : 0;
         $n = 0;
         while ($n < $budget && $cells) {
             // Packs: lone hunter, pair, flock of one kind, mixed squad or a coven guarded by a healer.
@@ -158,8 +201,14 @@ final class Game
                 array_splice($cells, $best[1], 1);
                 $affixes = self::rollAffixes($rng, $level);
                 if ($roll > 90 && $member === 0 && ! $healers) $affixes = array_values(array_unique(array_merge($affixes, ['shaman'])));
-                $elite = $rng->next(1, 100) <= 6 + min(20, $s['floor'] * 2);
-                $s['enemies']['e'.$n] = self::spawn($s, 'e'.$n, $type, $x, $y, $elite, false, $affixes);
+                $elite = $rng->next(1, 100) <= 6 + min(20, $s['floor'] * 2) + (int) self::omen($s, 'elite');
+                // Deeper down two species may fuse into a chimera.
+                $fused = null;
+                if ($chimeraChance > 0 && $rng->next(1, 100) <= $chimeraChance) {
+                    $other = $roster[$rng->next(0, count($roster) - 1)];
+                    if ($other !== $type) $fused = $other;
+                }
+                $s['enemies']['e'.$n] = self::spawn($s, 'e'.$n, $type, $x, $y, $elite, false, $affixes, $fused);
                 $n++;
             }
         }
@@ -168,8 +217,10 @@ final class Game
             $s['enemies']['boss'] = self::spawn($s, 'boss', self::bossType($s), $x, $y, false, false, $cycle > 0 ? self::rollAffixes($rng, $level) : []);
         }
         // Furniture: chests and a spring on every floor, a fury altar deeper down, more traps as you descend.
-        $plan = array_merge(array_fill(0, $s['floor'] >= 2 ? 3 : 2, 'chest'), ['fountain'], $s['floor'] >= 2 ? ['shrine'] : [],
-            array_fill(0, min(8, 2 + $s['floor']), 'trap'));
+        $plan = array_merge(array_fill(0, ($s['floor'] >= 2 ? 3 : 2) + (int) self::omen($s, 'chests'), 'chest'),
+            array_fill(0, 1 + (int) self::omen($s, 'fountains'), 'fountain'),
+            array_fill(0, ($s['floor'] >= 2 ? 1 : 0) + (int) self::omen($s, 'shrines'), 'shrine'),
+            array_fill(0, min(8, 2 + $s['floor']) * (int) max(1, self::omen($s, 'traps')), 'trap'));
         $s['objects'] = [];
         foreach ($plan as $o => $type) {
             if (! $cells) break;
@@ -181,13 +232,14 @@ final class Game
         $offset = 0;
         foreach ($s['players'] as &$p) {
             if ($p['outcome'] === null) {
-                $p['x'] = 5 + $offset++;
-                $p['y'] = 5;
+                [$p['x'], $p['y']] = self::SPAWNS[$offset++ % count(self::SPAWNS)];
             }
         }
         unset($p);
         $s['rng'] = $rng->state;
-        $s['log'][] = 'Глубина '.$s['floor'].' ('.$biome['name'].'), уровень врагов '.$level.'. Босс на глубине '.self::bossFloor($s).'.';
+        $text = 'Глубина '.$s['floor'].' ('.$biome['name'].'), уровень врагов '.$level.'. Босс на глубине '.self::bossFloor($s).'.';
+        foreach ($s['omens'] as $omen) $text .= ' Знамение: '.Catalog::omens()[$omen]['name'].'.';
+        $s['log'][] = $text;
 
         return $s;
     }
@@ -208,15 +260,26 @@ final class Game
         return array_keys($chosen);
     }
 
-    private static function spawn(array $s, string $id, string $type, int $x, int $y, bool $elite, bool $summoned = false, array $affixes = []): array
+    /** Species definition of a creature, fused with its second half for a chimera. */
+    private static function definition(array $e): array
     {
-        $def = Catalog::enemy($type);
+        $def = Catalog::enemy($e['type']);
+
+        return isset($e['fused']) ? Catalog::chimera($e['type'], $e['fused']) + $def : $def;
+    }
+
+    private static function spawn(array $s, string $id, string $type, int $x, int $y, bool $elite, bool $summoned = false, array $affixes = [], ?string $fused = null): array
+    {
+        $def = $fused ? Catalog::chimera($type, $fused) + Catalog::enemy($type) : Catalog::enemy($type);
         $biome = self::biome($s);
         $boss = $def['boss'] ?? false;
         $level = self::depthLevel($s);
         $hp = ($def['hp'] + ($boss ? $biome['enemy_hp'] * 3 : 5 * $level + $biome['enemy_hp'])) * ($boss ? 1 + 0.1 * ($level - 1) : 1 + 0.06 * ($level - 1));
-        $damage = $def['damage'] * (1 + 0.07 * ($level - 1));
-        $armor = $def['armor'] + intdiv($level, 8);
+        // Every extra party member adds toughness: a bigger party fights longer battles, not trivial ones.
+        $hp *= 1 + ($boss ? 0.25 : 0.12) * (self::partySize($s) - 1);
+        $hp *= 1 + self::omen($s, 'hp');
+        $damage = $def['damage'] * (1 + 0.07 * ($level - 1)) * (1 + self::omen($s, 'damage'));
+        $armor = $def['armor'] + intdiv($level, 8) + (int) self::omen($s, 'armor');
         $range = $def['range'];
         $attack = $def['attack'];
         $step = $def['step'];
@@ -233,12 +296,13 @@ final class Game
             if (isset($mod['attack'])) $attack = max(5, $attack + $mod['attack']);
             $specials = array_values(array_unique(array_merge($specials, $mod['specials'] ?? [])));
         }
-        $hp = (int) round($hp);
+        $hp = max(1, (int) round($hp));
         if ($elite) $hp = intdiv($hp * 8, 5);
-        $e = ['id' => $id, 'type' => $type, 'name' => ($elite ? 'Матёрый ' : '').$def['name'].($names ? ': '.implode(', ', $names) : ''),
+        $e = ['id' => $id, 'type' => $type, 'name' => ($elite ? 'Матёрый ' : '').($fused ? 'Химера ' : '').$def['name'].($names ? ': '.implode(', ', $names) : ''),
             'x' => $x, 'y' => $y, 'hp' => $hp, 'max_hp' => $hp, 'ready_at' => 0, 'level' => $level,
             'damage' => (int) round($damage) + $biome['enemy_damage'] + ($elite ? 2 : 0), 'armor' => $armor, 'range' => $range,
             'attack' => $attack, 'step' => $step, 'specials' => $specials];
+        if ($fused) $e['fused'] = $fused;
         if ($affixes) $e['affixes'] = array_values($affixes);
         if ($elite) $e['elite'] = true;
         if ($boss) {
@@ -260,7 +324,7 @@ final class Game
         if (array_key_exists($key, $e)) {
             return $e[$key];
         }
-        $def = Catalog::enemy($e['type']);
+        $def = self::definition($e);
         if ($key === 'damage') {
             return $def['damage'] + self::biome($s)['enemy_damage'] + (($e['elite'] ?? false) ? 2 : 0);
         }
@@ -316,6 +380,26 @@ final class Game
         return self::DIRS[$direction];
     }
 
+    /** Magic power behind a hero's spells; the arcane surge trait makes it count half again. */
+    private static function spellPower(array $p): int
+    {
+        $power = $p['power'] ?? 0;
+
+        return self::has($p, 'arcane_surge') ? intdiv($power * 3, 2) : $power;
+    }
+
+    /** Poisons a monster on behalf of a player. */
+    private static function poisonEnemy(array &$s, string $enemyId, string $playerId, int $damage, int $ticks): void
+    {
+        if (! isset($s['enemies'][$enemyId]) || $s['enemies'][$enemyId]['hp'] <= 0) return;
+        $e = &$s['enemies'][$enemyId];
+        $active = ($e['poison_until'] ?? 0) > $s['tick'];
+        $e['poison_dmg'] = $active ? max($e['poison_dmg'] ?? 0, $damage) : $damage;
+        $e['poison_until'] = max($e['poison_until'] ?? 0, $s['tick'] + $ticks);
+        $e['poisoner'] = $playerId;
+        unset($e);
+    }
+
     public static function command(array $s, string $playerId, array $command): array
     {
         if ($s['status'] !== 'active' || ! isset($s['players'][$playerId])) {
@@ -357,14 +441,19 @@ final class Game
                 throw new DomainException('invalid_target');
             }
             if ($action === 'bash') self::skillReady($p, 'bash', $s['tick']);
-            $range=($action==='attack' && ($p['class_id']??'')==='ranger')?5:1;
+            $range=($action==='attack' && self::has($p,'ranged'))?5:1;
             if (abs($p['x'] - $hostile[0]) + abs($p['y'] - $hostile[1]) > $range || !self::visible($s['map'],$p['x'],$p['y'],$hostile[0],$hostile[1])) {
                 throw new DomainException('out_of_range');
             }
             $rng = new Random($s['rng']);
             $damage = $rng->next(10, 16)+($p['damage_bonus']??0)+(($p['might_until']??0)>$s['tick']?5:0);
-            if (($p['crit'] ?? 0) > 0 && $rng->next(1, 100) <= $p['crit']) {
-                $damage *= 2;
+            if (self::has($p, 'rage') && $p['hp'] * 2 < $p['max_hp']) {
+                $damage = intdiv($damage * 3, 2);
+            }
+            $backstab = self::has($p, 'backstab');
+            $crit = ($p['crit'] ?? 0) + ($backstab ? 10 : 0);
+            if ($crit > 0 && $rng->next(1, 100) <= $crit) {
+                $damage *= $backstab ? 3 : 2;
                 $s['log'][] = $p['name'].': критический удар!';
             }
             $s['rng'] = $rng->state;
@@ -374,7 +463,12 @@ final class Game
                 if (isset($s['enemies'][$id])) $s['enemies'][$id]['ready_at'] = max($s['enemies'][$id]['ready_at'], $s['tick'] + 10);
                 else $s['players'][$id]['ready_at'] = max($s['players'][$id]['ready_at'], $s['tick'] + 8);
             }
+            $venom = self::has($p, 'venom_touch');
+            $level = $p['level'] ?? 1;
             self::leech($s, $playerId, self::hit($s, $playerId, $id, $damage, true));
+            if ($venom) {
+                self::poisonEnemy($s, $id, $playerId, 3 + intdiv($level, 5), 40);
+            }
         } elseif ($action==='revive') {
             $id=$command['target_id']??'';$target=$s['players'][$id]??null;
             if (!$target || $target['outcome']!==null || $target['hp']>0 || ($target['downed_until']??0)<=$s['tick']) throw new DomainException('cannot_revive');
@@ -386,16 +480,30 @@ final class Game
             $spell=Catalog::spells()[$key]??null;
             if (!$spell || ($p['level']??1)<$spell['level']) throw new DomainException('spell_locked');
             if (($p['spell_ready'][$key]??0)>$s['tick']) throw new DomainException('spell_cooldown');
-            if (($p['mana']??60)<$spell['mana']) throw new DomainException('not_enough_mana');
-            $power = $p['power'] ?? 0;
+            $cost = Catalog::spellCost($spell, $p['schools'] ?? Catalog::build($p['class_id'] ?? 'guardian')['schools']);
+            if (($p['mana']??60)<$cost) throw new DomainException('not_enough_mana');
+            $power = self::spellPower($p);
             $kind = $spell['kind'];
             if ($kind === 'heal') {
-                $id=(($p['class_id']??'')==='warden')?($command['target_id']??$playerId):$playerId;
+                $id=self::has($p,'ally_heal')?($command['target_id']??$playerId):$playerId;
                 $target=$s['players'][$id]??null;
                 if ($duel && $id !== $playerId) throw new DomainException('cannot_heal');
                 if (!$target || $target['outcome']!==null || $target['hp']<=0 || $target['hp']===$target['max_hp']) throw new DomainException('cannot_heal');
                 if (abs($p['x']-$target['x'])+abs($p['y']-$target['y'])>3 || !self::visible($s['map'],$p['x'],$p['y'],$target['x'],$target['y'])) throw new DomainException('out_of_range');
                 $s['players'][$id]['hp']=min($target['max_hp'],$target['hp']+$spell['heal']+$power);
+            } elseif ($kind === 'sanctuary') {
+                $healed = 0;
+                foreach ($s['players'] as $id => $member) {
+                    if (($id === $playerId || ! $duel) && $member['outcome'] === null && $member['hp'] > 0 && $member['hp'] < $member['max_hp'] &&
+                        abs($p['x'] - $member['x']) + abs($p['y'] - $member['y']) <= $spell['range'] &&
+                        self::visible($s['map'], $p['x'], $p['y'], $member['x'], $member['y'])) {
+                        $s['players'][$id]['hp'] = min($member['max_hp'], $member['hp'] + $spell['heal'] + intdiv($power, 2));
+                        $healed++;
+                    }
+                }
+                if ($healed === 0) throw new DomainException('cannot_heal');
+            } elseif ($kind === 'rage') {
+                $p['might_until'] = max($p['might_until'] ?? 0, $s['tick'] + $spell['duration']);
             } elseif ($kind === 'barrier') {
                 foreach ($s['players'] as $id => $member) {
                     if (($id === $playerId || ! $duel) && $member['outcome'] === null && $member['hp'] > 0 &&
@@ -433,7 +541,7 @@ final class Game
                     }
                 }
                 $targets = match ($kind) {
-                    'nova', 'whirl' => array_keys($near),
+                    'nova', 'whirl', 'root' => array_keys($near),
                     'chain' => self::nearest($near, 3, $command['target_id'] ?? null),
                     default => isset($near[$command['target_id'] ?? '']) ? [$command['target_id']] : [],
                 };
@@ -457,7 +565,7 @@ final class Game
                         }
                     } elseif (isset($s['players'][$tid]) && $s['players'][$tid]['hp'] > 0) {
                         if (isset($spell['freeze'])) $s['players'][$tid]['ready_at'] = max($s['players'][$tid]['ready_at'], $s['tick'] + intdiv($spell['freeze'], 2));
-                        if (isset($spell['poison'])) {
+                        if (isset($spell['poison']) && ! self::has($s['players'][$tid], 'unliving')) {
                             $s['players'][$tid]['poison_until'] = $s['tick'] + 40;
                             $s['players'][$tid]['poison_dmg'] = 2 + intdiv($power, 4);
                         }
@@ -471,7 +579,7 @@ final class Game
                     }
                 }
             }
-            $p['mana']=($p['mana']??60)-$spell['mana'];
+            $p['mana']=($p['mana']??60)-$cost;
             $p['spell_ready'][$key]=$s['tick']+$spell['cooldown']; $p['ready_at']=$s['tick']+5;
             $s['log'][]=$p['name'].': '.$spell['name'];
         } elseif ($action === 'guard') {
@@ -511,6 +619,11 @@ final class Game
                     $item = Catalog::generate($rng, max(1, intdiv(self::depthLevel($s) + 2, 3)), $rng->next(1, 100) <= 30, $p['class_id'] ?? 'guardian');
                     $p['loot'][] = $item;
                     $text .= ', '.Catalog::item($item)['name'];
+                }
+                if ($rng->next(1, 100) <= 50) {
+                    $reagent = Catalog::reagentOf($biome['roster'][$rng->next(0, count($biome['roster']) - 1)]);
+                    $p['reagents'][$reagent] = ($p['reagents'][$reagent] ?? 0) + 1;
+                    $text .= ', '.mb_strtolower(Catalog::reagents()[$reagent]['name']);
                 }
                 $s['rng'] = $rng->state;
                 $s['log'][] = $text.'.';
@@ -603,13 +716,30 @@ final class Game
     private static function strike(array &$s, string $playerId, string $enemyId, int $damage, bool $physical): int
     {
         $e = $s['enemies'][$enemyId];
+        $specials = self::stat($s, $e, 'specials');
+        $name = $e['name'] ?? self::definition($e)['name'];
+        if ($physical && in_array('evade', $specials, true)) {
+            $rng = new Random($s['rng']);
+            $miss = $rng->next(1, 100) <= 25;
+            $s['rng'] = $rng->state;
+            if ($miss) {
+                $s['log'][] = $name.' уклоняется.';
+
+                return 0;
+            }
+        }
         if ($physical) {
             $damage = max(1, $damage - self::stat($s, $e, 'armor'));
+        } elseif (in_array('warded', $specials, true)) {
+            $damage = max(1, intdiv($damage + 1, 2));
         }
         $dealt = min($e['hp'], $damage);
         $e['hp'] = max(0, $e['hp'] - $damage);
         $s['enemies'][$enemyId]['hp'] = $e['hp'];
-        $s['log'][] = ($s['players'][$playerId]['name'] ?? 'Яд').' → '.($e['name'] ?? Catalog::enemy($e['type'])['name']).': '.$damage;
+        $s['log'][] = ($s['players'][$playerId]['name'] ?? 'Яд').' → '.$name.': '.$damage;
+        if ($physical && $dealt > 0 && in_array('thorns', $specials, true) && isset($s['players'][$playerId])) {
+            self::hurt($s, $playerId, max(1, intdiv($dealt, 5)), 'Шипы', false);
+        }
         if ($e['hp'] === 0) {
             self::slay($s, $playerId, $e);
         }
@@ -619,17 +749,34 @@ final class Game
 
     private static function slay(array &$s, string $playerId, array $e): void
     {
-        $def = Catalog::enemy($e['type']);
+        $def = self::definition($e);
+        $specials = self::stat($s, $e, 'specials');
         if (isset($s['players'][$playerId])) {
             self::reward($s, $playerId, $e);
         }
-        if (in_array('explode', self::stat($s, $e, 'specials'), true)) {
+        if (in_array('explode', $specials, true)) {
             $s['log'][] = ($e['name'] ?? $def['name']).' взрывается!';
             foreach ($s['players'] as $pid => $member) {
                 if (abs($member['x'] - $e['x']) + abs($member['y'] - $e['y']) <= 1) {
                     self::hurt($s, $pid, 10 + 2 * self::biome($s)['enemy_damage'] + intdiv($e['level'] ?? 1, 2), 'Взрыв', false);
                 }
             }
+        }
+        // A splitting creature breaks into two lesser copies that cannot split again.
+        if (in_array('split', $specials, true) && ! ($e['shard'] ?? false)) {
+            $made = 0;
+            foreach ([[1, 0], [-1, 0], [0, 1], [0, -1]] as [$dx, $dy]) {
+                if ($made >= 2 || ! self::free($s, $e['x'] + $dx, $e['y'] + $dy)) continue;
+                $id = $e['id'].'-'.$made;
+                $hp = max(1, intdiv($e['max_hp'] ?? 30, 3));
+                $s['enemies'][$id] = ['id' => $id, 'type' => $e['type'], 'name' => 'Осколок: '.$def['name'], 'x' => $e['x'] + $dx, 'y' => $e['y'] + $dy,
+                    'hp' => $hp, 'max_hp' => $hp, 'ready_at' => $s['tick'] + 10, 'level' => $e['level'] ?? 1,
+                    'damage' => max(1, intdiv(self::stat($s, $e, 'damage'), 2)), 'armor' => 0, 'range' => self::stat($s, $e, 'range'),
+                    'attack' => self::stat($s, $e, 'attack'), 'step' => self::stat($s, $e, 'step'),
+                    'specials' => array_values(array_diff($specials, ['split', 'explode'])), 'summoned' => true, 'shard' => true];
+                $made++;
+            }
+            if ($made) $s['log'][] = ($e['name'] ?? $def['name']).' распадается надвое!';
         }
         if ($e['boss'] ?? false) {
             $s['bosses_slain'] = ($s['bosses_slain'] ?? 0) + 1;
@@ -650,7 +797,8 @@ final class Game
             $damage = max(1, (int) round($damage * $k / ($k + 3 * $p['armor'])));
         }
         if (($p['shield_until'] ?? 0) > $s['tick']) {
-            $damage = intdiv($damage, 2);
+            // A guardian's bulwark turns a raised shield into a near wall.
+            $damage = self::has($p, 'bulwark') ? intdiv($damage, 4) : intdiv($damage, 2);
         }
         $p['hp'] = max(0, $p['hp'] - $damage);
         unset($p['reviving']);
@@ -672,6 +820,9 @@ final class Game
         if ($s['tick']%10===0) {
             foreach ($s['players'] as &$p) {
                 $p['mana']=min($p['max_mana']??60,($p['mana']??60)+3);
+                if ($p['outcome'] === null && $p['hp'] > 0 && ($p['regen'] ?? 0) > 0) {
+                    $p['hp'] = min($p['max_hp'], $p['hp'] + $p['regen']);
+                }
                 // Poison and burns never finish a hero off on their own.
                 if ($p['outcome'] === null && $p['hp'] > 1 && ($p['poison_until'] ?? 0) > $s['tick']) {
                     $p['hp'] = max(1, $p['hp'] - ($p['poison_dmg'] ?? 2));
@@ -706,11 +857,11 @@ final class Game
             }
         }
         foreach (array_keys($s['enemies']) as $id) {
-            $e = $s['enemies'][$id];
-            if ($e['hp'] <= 0 || $e['ready_at'] > $s['tick']) {
+            $e = $s['enemies'][$id] ?? null;
+            if ($e === null || $e['hp'] <= 0 || $e['ready_at'] > $s['tick']) {
                 continue;
             }
-            $def = Catalog::enemy($e['type']);
+            $def = self::definition($e);
             $specials = self::stat($s, $e, 'specials');
             $boss = $e['boss'] ?? false;
             $target = null;
@@ -744,7 +895,7 @@ final class Game
             if ($boss && in_array('summon', $specials, true) && $s['tick'] >= ($e['summon_at'] ?? 0)) {
                 $s['enemies'][$id]['summon_at'] = $s['tick'] + 100;
                 $alive = count(array_filter($s['enemies'], static fn ($m) => ($m['summoned'] ?? false) && $m['hp'] > 0));
-                if ($alive < 3) {
+                if ($alive < 3 + intdiv(self::partySize($s) - 1, 2)) {
                     foreach ([[1, 0], [-1, 0], [0, 1], [0, -1]] as [$dx, $dy]) {
                         if (self::free($s, $e['x'] + $dx, $e['y'] + $dy)) {
                             $sid = 's'.$s['tick'];
@@ -759,6 +910,14 @@ final class Game
             $damage = self::stat($s, $e, 'damage');
             if (in_array('berserk', $specials, true) && $e['hp'] * 2 < ($e['max_hp'] ?? $e['hp'])) {
                 $damage = intdiv($damage * 3, 2);
+            }
+            // A warlord nearby drives its pack on.
+            foreach ($s['enemies'] as $aid => $ally) {
+                if ($aid !== $id && $ally['hp'] > 0 && in_array('warlord', self::stat($s, $ally, 'specials'), true) &&
+                    abs($ally['x'] - $e['x']) + abs($ally['y'] - $e['y']) <= 4) {
+                    $damage = intdiv($damage * 5, 4);
+                    break;
+                }
             }
             if ($boss && in_array('slam', $specials, true) && $s['tick'] >= ($e['slam_at'] ?? 0) && $distance <= 2) {
                 $s['log'][] = $def['name'].' обрушивает сокрушительный удар!';
@@ -780,9 +939,14 @@ final class Game
                     $s['enemies'][$id]['hp'] = min($e['max_hp'] ?? $e['hp'], $e['hp'] + intdiv($before - $victim['hp'], 2));
                 }
                 if ($victim['hp'] > 0) {
-                    if (in_array('poison', $specials, true)) {
+                    $immune = self::has($victim, 'unliving');
+                    if (in_array('poison', $specials, true) && ! $immune) {
                         $victim['poison_until'] = $s['tick'] + 50;
                         $victim['poison_dmg'] = 2 + intdiv($biome['enemy_damage'], 2) + intdiv($level, 4);
+                    }
+                    if (in_array('burn', $specials, true) && ! $immune) {
+                        $victim['poison_until'] = max($victim['poison_until'] ?? 0, $s['tick'] + 30);
+                        $victim['poison_dmg'] = max($victim['poison_dmg'] ?? 0, 4 + intdiv($biome['enemy_damage'], 2) + intdiv($level, 3));
                     }
                     if (in_array('chill', $specials, true)) {
                         $victim['ready_at'] = max($victim['ready_at'], $s['tick'] + 6);
@@ -791,16 +955,26 @@ final class Game
                         $victim['mana'] = max(0, ($victim['mana'] ?? 0) - 10);
                     }
                 }
+                $thorns = $victim['thorns'] ?? 0;
                 unset($victim);
                 $s['enemies'][$id]['ready_at'] = $s['tick'] + $attack;
+                // Thorns answer every blow taken in melee.
+                if ($thorns > 0 && $distance <= 1 && $s['enemies'][$id]['hp'] > 0) {
+                    self::strike($s, $target, $id, $thorns, false);
+                }
             } elseif (self::stat($s, $e, 'step') > 0) {
-                $candidates = [[$e['x'] + 1, $e['y']], [$e['x'] - 1, $e['y']], [$e['x'], $e['y'] + 1], [$e['x'], $e['y'] - 1]];
-                usort($candidates, static fn ($a, $b) => (abs($a[0] - $p['x']) + abs($a[1] - $p['y'])) <=> (abs($b[0] - $p['x']) + abs($b[1] - $p['y'])));
-                foreach ($candidates as [$x,$y]) {
-                    if (self::free($s, $x, $y)) {
-                        $s['enemies'][$id]['x'] = $x;
-                        $s['enemies'][$id]['y'] = $y;
-                        break;
+                $steps = in_array('blink', $specials, true) ? 2 : 1;
+                for ($n = 0; $n < $steps; $n++) {
+                    $here = $s['enemies'][$id];
+                    if (abs($here['x'] - $p['x']) + abs($here['y'] - $p['y']) <= 1) break;
+                    $candidates = [[$here['x'] + 1, $here['y']], [$here['x'] - 1, $here['y']], [$here['x'], $here['y'] + 1], [$here['x'], $here['y'] - 1]];
+                    usort($candidates, static fn ($a, $b) => (abs($a[0] - $p['x']) + abs($a[1] - $p['y'])) <=> (abs($b[0] - $p['x']) + abs($b[1] - $p['y'])));
+                    foreach ($candidates as [$x,$y]) {
+                        if (self::free($s, $x, $y)) {
+                            $s['enemies'][$id]['x'] = $x;
+                            $s['enemies'][$id]['y'] = $y;
+                            break;
+                        }
                     }
                 }
                 $s['enemies'][$id]['ready_at'] = $s['tick'] + self::stat($s, $e, 'step');
@@ -886,7 +1060,11 @@ final class Game
         $p = &$s['players'][$playerId];
         $area = self::biome($s);
         $scale = $area['reward'];
-        $def = Catalog::enemy($e['type']);
+        $def = self::definition($e);
+        if (self::has($p, 'soul_harvest') && $p['hp'] > 0) {
+            $p['mana'] = min($p['max_mana'] ?? 60, ($p['mana'] ?? 0) + 8);
+            $p['hp'] = min($p['max_hp'], $p['hp'] + max(1, intdiv($p['max_hp'], 20)));
+        }
         if ($e['summoned'] ?? false) {
             $p['xp'] += 2 * $scale;
 
@@ -895,20 +1073,21 @@ final class Game
         $level = $e['level'] ?? 1;
         $boss = $def['boss'] ?? false;
         $elite = $e['elite'] ?? false;
-        $bonus = ($elite ? 2 : 1) * (1 + 0.2 * count($e['affixes'] ?? []));
-        $p['gold'] += (int) round(5 * $level * $scale * $bonus);
-        $p['xp'] += (int) round($def['xp'] * $scale * $bonus * (1 + 0.1 * ($level - 1)));
+        $bonus = ($elite ? 2 : 1) * (1 + 0.2 * count($e['affixes'] ?? [])) * (isset($e['fused']) ? 1.5 : 1);
+        $p['gold'] += (int) round(5 * $level * $scale * $bonus * (1 + self::omen($s, 'gold')) * (1 + ($p['greed'] ?? 0) / 100));
+        $p['xp'] += (int) round($def['xp'] * $scale * $bonus * (1 + 0.1 * ($level - 1)) * (1 + self::omen($s, 'xp')));
         $p['kills']++;
         $p['slain'][$e['type']] = ($p['slain'][$e['type']] ?? 0) + 1;
+        if (isset($e['fused'])) $p['slain'][$e['fused']] = ($p['slain'][$e['fused']] ?? 0) + 1;
         $cycle = intdiv($s['floor'] - 1, $area['floors']);
         if ($boss) {
             $p['essence'] = ($p['essence'] ?? 0) + 2 + $area['chapter'] + $cycle;
         } elseif ($elite || count($e['affixes'] ?? []) >= 2) {
             $p['essence'] = ($p['essence'] ?? 0) + 1;
         }
+        $rng = new Random($s['rng']);
         // Every second kill and every elite yield an item; the first boss of an area drops its unique.
         if ($boss || $elite || $p['kills'] % 2 === 0) {
-            $rng = new Random($s['rng']);
             $tier = max(1, intdiv($level + 2, 3)) + ($boss ? 1 : 0);
             if ($boss && $cycle === 0) {
                 $p['loot'][] = $area['unique'];
@@ -918,8 +1097,15 @@ final class Game
             } else {
                 $p['loot'][] = Catalog::generate($rng, $tier, $boss || $elite || $rng->next(1, 100) <= 25, $p['class_id'] ?? 'guardian');
             }
-            $s['rng'] = $rng->state;
         }
+        // Reagents for the forge and the alchemist: every species yields its own, a chimera both halves.
+        $times = 1 + (int) self::omen($s, 'reagents');
+        foreach (array_filter([$e['type'], $e['fused'] ?? null]) as $species) {
+            $reagent = Catalog::reagentOf($species);
+            $count = $boss ? 2 : ($elite ? 1 : ($rng->next(1, 100) <= 35 ? 1 : 0));
+            if ($count > 0) $p['reagents'][$reagent] = ($p['reagents'][$reagent] ?? 0) + $count * $times;
+        }
+        $s['rng'] = $rng->state;
         unset($p);
     }
 
@@ -971,15 +1157,17 @@ final class Game
     {
         $p = $s['players'][$playerId];
         $map = array_fill(0, 32, str_repeat(' ', 32));
+        $sight = 8;
+        foreach ($s['omens'] ?? [] as $omen) $sight = min($sight, Catalog::omens()[$omen]['sight'] ?? 8);
         // Each line of sight is traced once; wall cells re-use their neighbours' results.
         $seen = [];
         $sees = static function (int $x, int $y) use (&$seen, $s, $p): bool {
             return $seen[$y * 64 + $x + 65] ??= self::visible($s['map'], $p['x'], $p['y'], $x, $y);
         };
-        for ($y = max(0, $p['y'] - 8); $y <= min(31, $p['y'] + 8); $y++) {
-            for ($x = max(0, $p['x'] - 8); $x <= min(31, $p['x'] + 8); $x++) {
+        for ($y = max(0, $p['y'] - $sight); $y <= min(31, $p['y'] + $sight); $y++) {
+            for ($x = max(0, $p['x'] - $sight); $x <= min(31, $p['x'] + $sight); $x++) {
                 // Reveal adjacent walls, but never objects behind them.
-                if (abs($x - $p['x']) + abs($y - $p['y']) <= 8) {
+                if (abs($x - $p['x']) + abs($y - $p['y']) <= $sight) {
                     if ($sees($x, $y)) {
                         $map[$y][$x] = $s['map'][$y][$x];
                     } elseif ($s['map'][$y][$x] === '#') {
@@ -1019,11 +1207,12 @@ final class Game
         $exit = $map[$s['exit'][1]][$s['exit'][0]] === '.' ? $s['exit'] : null;
         $biome = self::biome($s);
         $bossType = $duel ? null : Catalog::enemy(self::bossType(['floor' => self::bossFloor($s)] + $s))['name'];
+        $omens = array_map(static fn ($o) => Catalog::omens()[$o]['name'], $s['omens'] ?? []);
 
         return ['tick' => (string) $s['tick'], 'mode' => $s['mode'] ?? 'expedition', 'floor' => $s['floor'],
             'last_floor' => self::bossFloor($s), 'boss_floor' => self::bossFloor($s), 'depth_level' => self::depthLevel($s),
-            'party_level' => $s['party_level'] ?? 1, 'biome'=>$s['biome']??'mines',
-            'biome_name'=>$duel ? 'Арена' : $biome['name'], 'boss_name' => $bossType, 'status' => $s['status'],
+            'party_level' => $s['party_level'] ?? 1, 'party_size' => count($s['players']), 'biome'=>$s['biome']??'mines',
+            'biome_name'=>$duel ? 'Арена' : $biome['name'], 'boss_name' => $bossType, 'status' => $s['status'], 'omens' => $omens,
             'map' => $map, 'exit' => $exit, 'self' => $p, 'players' => $players, 'enemies' => $enemies, 'objects' => $objects, 'log' => $s['log']];
     }
 }

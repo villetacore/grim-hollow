@@ -9,16 +9,30 @@ begin
   if FExpedition<>'' then begin FStatus.Caption:='Сначала завершите поход текущего героя.';Exit;end;
   C:=FCharacters.FindPath('items').Items[FHeroes.ItemIndex];FHero:=JStr(C,'id');
   // Fetch the selected hero afresh: cached list entries may refer to a finished run.
-  FreeAndNil(FSheet);FreeAndNil(FSnapshot);FMap.Invalidate;
+  FreeAndNil(FSheet);FreeAndNil(FSnapshot);ResetPlaza;FMap.Invalidate;
   FChatCursor:='0';FChat.Clear;RefreshSheet;
 end;
 
 procedure TGameForm.ShowSheet;
-var Items,S:TJSONData;I,OldIndex,LevelValue:Integer;Prefix,NextValue:string;
+var Items,S:TJSONData;I,OldIndex,LevelValue:Integer;Prefix,NextValue,Build,Mentor:string;
 begin
   if FSheet=nil then Exit;
   LevelValue:=JInt(FSheet,'level',1);NextValue:=JStr(FSheet,'next_level_xp','MAX');
-  FHeroInfo.Caption:=JStr(FSheet,'name')+'  /  '+GameWord(JStr(FSheet,'class_id'))+LineEnding+
+  if JStr(FSheet,'mentor')<>'' then Mentor:=GameWord(JStr(FSheet,'mentor')) else Mentor:='нет (выбор с '+JStr(FSheet,'mentor_level','10')+' уровня)';
+  Build:='';Items:=FSheet.FindPath('stats.traits');
+  if Items<>nil then for I:=0 to Items.Count-1 do Build:=Build+LineEnding+'  • '+JStr(FSheet,'traits.'+Items.Items[I].AsString,Items.Items[I].AsString);
+  Items:=FSheet.FindPath('stats.schools');Prefix:='';
+  if Items<>nil then for I:=0 to Items.Count-1 do begin if Prefix<>'' then Prefix:=Prefix+', ';Prefix:=Prefix+JStr(FSheet,'schools.'+Items.Items[I].AsString);end;
+  Build:='Черты:'+Build+LineEnding+'Школы магии (−25% маны): '+Prefix;
+  Items:=FSheet.FindPath('stats.sets');
+  if (Items<>nil) and (Items.Count>0) then begin Prefix:='';for I:=0 to Items.Count-1 do begin if Prefix<>'' then Prefix:=Prefix+', ';Prefix:=Prefix+Items.Items[I].AsString;end;
+    Build:=Build+LineEnding+'Комплекты: '+Prefix;end;
+  if JStr(FSheet,'elixir.name')<>'' then Build:=Build+LineEnding+'Эликсир на поход: '+JStr(FSheet,'elixir.name');
+  if JInt(FSheet,'stats.thorns')+JInt(FSheet,'stats.regen')+JInt(FSheet,'stats.greed')+JInt(FSheet,'stats.crit')+JInt(FSheet,'stats.leech')>0 then
+    Build:=Build+LineEnding+'Крит '+JStr(FSheet,'stats.crit','0')+'%  Вампиризм '+JStr(FSheet,'stats.leech','0')+'%  Шипы '+JStr(FSheet,'stats.thorns','0')+
+      '  Восст. '+JStr(FSheet,'stats.regen','0')+' HP/с  Золото +'+JStr(FSheet,'stats.greed','0')+'%';
+  FHeroInfo.Caption:=JStr(FSheet,'name')+'  /  '+GameWord(JStr(FSheet,'origin'))+' '+GameWord(JStr(FSheet,'class_id'))+LineEnding+
+    'Наставник: '+Mentor+LineEnding+
     'Уровень '+IntToStr(LevelValue)+'   Опыт: '+JStr(FSheet,'xp')+' / '+NextValue+LineEnding+
     'Золото в городе: '+JStr(FSheet,'gold')+LineEnding+LineEnding+
     'Сила: '+JStr(FSheet,'attributes.strength')+LineEnding+'Живучесть: '+JStr(FSheet,'attributes.vitality')+LineEnding+
@@ -28,7 +42,16 @@ begin
     'Сила магии: '+JStr(FSheet,'stats.power')+LineEnding+
     'Эссенция: '+JStr(FSheet,'essence','0')+'   Пройдено областей: '+JStr(FSheet,'campaign','0')+'/6'+LineEnding+
     'Рекорд глубины: '+JStr(FSheet,'best_depth','0')+'   Кузница до +'+JStr(FSheet,'forge_limit','2')+LineEnding+
-    'Дуэли: рейтинг '+JStr(FSheet,'rating','1000')+', побед '+JStr(FSheet,'duel_wins','0')+', поражений '+JStr(FSheet,'duel_losses','0');
+    'Дуэли: рейтинг '+JStr(FSheet,'rating','1000')+', побед '+JStr(FSheet,'duel_wins','0')+', поражений '+JStr(FSheet,'duel_losses','0')+LineEnding+LineEnding+Build;
+  // Areas come from the server, so new ones appear without a client change.
+  Items:=FSheet.FindPath('biomes');
+  if (Items<>nil) and (Items.Count<>FBiomeKeys.Count) then begin
+    OldIndex:=FBiome.ItemIndex;FBiome.Clear;FBiomeKeys.Clear;
+    for I:=0 to Items.Count-1 do begin
+      FBiome.Items.Add(IntToStr(I+1)+'. '+JStr(Items.Items[I],'name')+' ('+JStr(Items.Items[I],'floors')+' эт. до босса)');
+      FBiomeKeys.Add(TJSONObject(Items).Names[I]);end;
+    if (OldIndex<0) or (OldIndex>=FBiome.Items.Count) then OldIndex:=0;FBiome.ItemIndex:=OldIndex;
+  end;
   FExperience.Max:=JInt(FSheet,'next_level_xp',JInt(FSheet,'xp')+1)-JInt(FSheet,'level_xp');
   FExperience.Position:=JInt(FSheet,'xp')-JInt(FSheet,'level_xp');
   if FExpedition='' then begin
@@ -48,6 +71,7 @@ begin
   for I:=0 to SpellCount-1 do begin
     S:=FSheet.FindPath('spells.'+SpellKey(I));if S=nil then Continue;Prefix:='';
     if LevelValue<JInt(S,'level') then Prefix:='[закрыто] ';
+    if JBool(S,'affinity') then Prefix:=Prefix+'★ ';
     FSpells.Items.Add('['+JStr(S,'key')+'] '+Prefix+JStr(S,'name')+' (ур.'+JStr(S,'level')+', '+JStr(S,'mana')+' MP)');
   end;
   if OldIndex<0 then OldIndex:=0;FSpells.ItemIndex:=OldIndex;SelectSpell(nil);

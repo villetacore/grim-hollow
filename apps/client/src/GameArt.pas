@@ -3,7 +3,7 @@ unit GameArt;
 interface
 uses Graphics,Types,SysUtils,Math;
 procedure Stone(C:TCanvas;X,Y,S,Variation:Integer;Wall:Boolean;const Biome:string;Dim:Boolean=False);
-procedure Figure(C:TCanvas;X,Y,S:Integer;const Kind:string;Ally,SelfHero:Boolean;HP:Integer);
+procedure Figure(C:TCanvas;X,Y,S:Integer;const Kind:string;Ally,SelfHero:Boolean;HP:Integer;ShowHP:Boolean=True);
 procedure TownScene(C:TCanvas;W,H:Integer);
 procedure Frame(C:TCanvas;const R:TRect);
 procedure EnemyMarks(C:TCanvas;X,Y,S,HP,MaxHP:Integer;Elite,Boss:Boolean);
@@ -31,6 +31,8 @@ begin
   else if Biome='catacombs' then begin Base:=$00545A5E;Light:=$00808A8E;Dark:=$00303538;end
   else if Biome='glacier' then begin Base:=$00806A50;Light:=$00C8B090;Dark:=$00503E2C;end
   else if Biome='citadel' then begin Base:=$00283A5C;Light:=$003060A0;Dark:=$00141C30;end
+  else if Biome='swamp' then begin Base:=$00384A3A;Light:=$00507A5A;Dark:=$00202C22;end
+  else if Biome='abyss' then begin Base:=$00502838;Light:=$00904868;Dark:=$00281420;end
   else begin Base:=$004A4131;Light:=$0062533E;Dark:=$00342C20;end;
   // Fog of war: explored but unseen cells keep their shape in a quarter of the light.
   if Dim then begin Base:=Darken(Base);Light:=Darken(Light);Dark:=Darken(Dark);end;
@@ -58,9 +60,12 @@ begin
     'frost_queen':Result:=$00FFD0A0;'ash_knight':Result:=$00303050;'cinder_mage':Result:=$00206EE0;
     'hellhound':Result:=$001030A0;'magma_brute':Result:=$001050D0;'ash_tyrant':Result:=$000020C0;
     'warden':Result:=$003D70BC;'prior':Result:=$00403030;
+    'bog_lurker':Result:=$00406048;'leech_swarm':Result:=$00283860;'mire_witch':Result:=$00507040;'toad_brute':Result:=$00409060;
+    'wisp':Result:=$00F0F080;'void_stalker':Result:=$00602040;'star_spawn':Result:=$00C080A0;'mind_flayer':Result:=$00803070;
+    'void_golem':Result:=$00401828;'comet_wisp':Result:=$0040C0F0;'mire_mother':Result:=$00305830;'void_king':Result:=$00A03080;
   else Result:=$003A3EB8;end;
 end;
-procedure Figure(C:TCanvas;X,Y,S:Integer;const Kind:string;Ally,SelfHero:Boolean;HP:Integer);
+procedure Figure(C:TCanvas;X,Y,S:Integer;const Kind:string;Ally,SelfHero:Boolean;HP:Integer;ShowHP:Boolean);
 var U,CX,CY:Integer;Cloth,Skin,Metal:TColor;Shape:Char;
 begin
   U:=Max(1,S div 12);CX:=X+S div 2;CY:=Y+S div 2;
@@ -70,13 +75,17 @@ begin
     if SelfHero then Cloth:=$00B5793D else Cloth:=$00669A48;
     if Kind='arcanist' then begin Cloth:=$009D5992;Shape:='m';end;
     if Kind='ranger' then begin Cloth:=$004C8454;Shape:='r';end;
+    if Kind='berserker' then begin Cloth:=$002A3AA0;Shape:='x';end;
+    if Kind='assassin' then begin Cloth:=$00303038;Shape:='k';end;
+    if Kind='necromancer' then begin Cloth:=$00402838;Metal:=$00C8D8E0;Shape:='m';end;
+    if Kind='druid' then begin Cloth:=$00307840;Shape:='d';end;
   end else begin
     Cloth:=EnemyCloth(Kind);Skin:=$00667493;
     case Kind of
-      'rat_swarm','rift_hound','frost_wolf','hellhound':Shape:='b';
-      'spore_bloater','rift_heart':Shape:='o';
-      'gargoyle','ice_golem','yeti','magma_brute':Shape:='g';
-      'acolyte','lich_acolyte','rime_witch','cinder_mage','prior','spitter','frost_queen':Shape:='m';
+      'rat_swarm','rift_hound','frost_wolf','hellhound','leech_swarm','void_stalker':Shape:='b';
+      'spore_bloater','rift_heart','wisp','star_spawn','comet_wisp':Shape:='o';
+      'gargoyle','ice_golem','yeti','magma_brute','bog_lurker','toad_brute','void_golem':Shape:='g';
+      'acolyte','lich_acolyte','rime_witch','cinder_mage','prior','spitter','frost_queen','mire_witch','mind_flayer','mire_mother':Shape:='m';
       'archer','thorn_archer','bone_archer':Shape:='r';
     end;
     if (Kind='skeleton') or (Kind='bone_archer') or (Kind='bone_king') then Skin:=$00D8E4EA;
@@ -100,11 +109,15 @@ begin
     Fill(C,CX-3*U,CY-2*U,6*U,6*U,Cloth);Fill(C,CX-2*U,CY-5*U,4*U,3*U,Skin);
     Fill(C,CX-2*U,CY-6*U,4*U,U,Metal);Fill(C,CX-2*U,CY+4*U,U,2*U,Metal);Fill(C,CX+U,CY+4*U,U,2*U,Metal);
     Fill(C,CX-4*U,CY-U,U,3*U,Skin);Fill(C,CX+3*U,CY-U,U,3*U,Skin);
-    if Shape='m' then begin Fill(C,CX+4*U,CY-4*U,U,9*U,$004174AB);Fill(C,CX+3*U,CY-5*U,3*U,2*U,$00E3BB77);end
+    if Shape='m' then begin Fill(C,CX+4*U,CY-4*U,U,9*U,$004174AB);Fill(C,CX+3*U,CY-5*U,3*U,2*U,Metal);end
     else if Shape='r' then begin C.Pen.Color:=$00628AB0;C.Brush.Style:=bsClear;C.Arc(CX+2*U,CY-4*U,CX+6*U,CY+5*U,270*16,180*16);C.Brush.Style:=bsSolid;end
+    else if Shape='x' then begin Fill(C,CX+4*U,CY-6*U,U,11*U,$00305A80);Fill(C,CX+5*U,CY-6*U,3*U,4*U,Metal);Fill(C,CX-3*U,CY-2*U,6*U,2*U,$001820C0);end
+    else if Shape='k' then begin Fill(C,CX-3*U,CY-6*U,6*U,2*U,Cloth);Fill(C,CX+4*U,CY-U,U,4*U,Metal);Fill(C,CX-5*U,CY-U,U,4*U,Metal);end
+    else if Shape='d' then begin Fill(C,CX+4*U,CY-5*U,U,10*U,$00305A80);Fill(C,CX+3*U,CY-7*U,3*U,3*U,$0030B050);Fill(C,CX-2*U,CY-6*U,4*U,U,$0030A040);end
     else begin Fill(C,CX+4*U,CY-5*U,U,8*U,Metal);Fill(C,CX+3*U,CY+U,3*U,U,$005B96B3);Fill(C,CX-5*U,CY-U,3*U,4*U,Metal);end;
   end;
   if SelfHero then begin C.Brush.Style:=bsClear;C.Pen.Color:=$0094D6E5;C.Rectangle(X+1,Y+1,X+S-1,Y+S-1);C.Brush.Style:=bsSolid;end;
+  if not ShowHP then Exit;
   C.Font.Name:='Tahoma';C.Font.Size:=8;C.Font.Color:=clWhite;C.Brush.Color:=$00141618;
   C.TextOut(X+S div 2-C.TextWidth(IntToStr(HP)) div 2,Y-3,IntToStr(HP));
 end;
@@ -189,6 +202,21 @@ begin
     'signet':begin C.Brush.Style:=bsClear;C.Pen.Color:=M;C.Pen.Width:=W*2;C.Ellipse(PX(3),PY(4),PX(9),PY(10));C.Pen.Width:=1;C.Brush.Style:=bsSolid;Fill(C,PX(5),PY(2),2*U,2*U,M);end;
     'amulet':begin Line(C,PX(2),PY(1),PX(6),PY(6),1,M);Line(C,PX(10),PY(1),PX(6),PY(6),1,M);Disc(C,PX(6),PY(8),2*U,M);Disc(C,PX(6),PY(8),U,$0040E060);end;
     'talisman':begin Line(C,PX(2),PY(1),PX(6),PY(5),1,M);Line(C,PX(10),PY(1),PX(6),PY(5),1,M);C.Brush.Color:=M;C.Pen.Color:=M;C.Polygon([Point(PX(6),PY(5)),Point(PX(9),PY(8)),Point(PX(6),PY(11)),Point(PX(3),PY(8))]);end;
+    'greatsword':begin Line(C,PX(2),PY(10),PX(10),PY(2),W*3,M);Line(C,PX(1),PY(8),PX(4),PY(11),W*2,Wood);end;
+    'spear':begin Line(C,PX(2),PY(11),PX(9),PY(4),W,Wood);C.Brush.Color:=M;C.Pen.Color:=M;C.Polygon([Point(PX(11),PY(1)),Point(PX(8),PY(3)),Point(PX(10),PY(5))]);end;
+    'scythe':begin Line(C,PX(4),PY(11),PX(7),PY(2),W,Wood);C.Pen.Color:=M;C.Pen.Width:=W*2;C.Brush.Style:=bsClear;C.Arc(PX(1),PY(1),PX(10),PY(7),0,180*16);C.Brush.Style:=bsSolid;C.Pen.Width:=1;end;
+    'claws':begin for W:=0 to 2 do Line(C,PX(3+W*2),PY(10),PX(5+W*2),PY(2),Max(1,U),M);Fill(C,PX(2),PY(9),8*U,2*U,Leather);end;
+    'totem':begin Fill(C,PX(5),PY(3),2*U,8*U,Wood);Fill(C,PX(3),PY(1),6*U,3*U,M);Fill(C,PX(4),PY(2),U,U,$002020C0);Fill(C,PX(7),PY(2),U,U,$002020C0);end;
+    'sickle':begin Line(C,PX(4),PY(11),PX(5),PY(7),W,Wood);C.Pen.Color:=M;C.Pen.Width:=W*2;C.Brush.Style:=bsClear;C.Arc(PX(3),PY(1),PX(11),PY(9),90*16,180*16);C.Brush.Style:=bsSolid;C.Pen.Width:=1;end;
+    'helm':begin Fill(C,PX(3),PY(3),6*U,6*U,M);Fill(C,PX(2),PY(8),8*U,2*U,M);Fill(C,PX(5),PY(5),2*U,3*U,$00181B1D);end;
+    'hood':begin C.Brush.Color:=Cloth;C.Pen.Color:=M;C.Polygon([Point(PX(6),PY(1)),Point(PX(10),PY(9)),Point(PX(2),PY(9))]);Fill(C,PX(5),PY(5),2*U,2*U,$00181B1D);end;
+    'circlet':begin C.Brush.Style:=bsClear;C.Pen.Color:=M;C.Pen.Width:=W;C.Ellipse(PX(2),PY(4),PX(10),PY(9));C.Pen.Width:=1;C.Brush.Style:=bsSolid;Disc(C,PX(6),PY(4),U,$00F0A040);end;
+    'gauntlets':begin Fill(C,PX(3),PY(3),6*U,7*U,M);for W:=0 to 3 do Fill(C,PX(3)+W*3*U div 2,PY(1),U,2*U,M);end;
+    'wraps':begin Fill(C,PX(3),PY(3),6*U,7*U,$00A0B8C8);for W:=0 to 2 do Line(C,PX(3),PY(4+W*2),PX(9),PY(5+W*2),1,M);end;
+    'bracers':begin Fill(C,PX(2),PY(4),8*U,5*U,Leather);Fill(C,PX(2),PY(5),8*U,U,M);Fill(C,PX(2),PY(7),8*U,U,M);end;
+    'boots':begin Fill(C,PX(3),PY(2),4*U,7*U,Leather);Fill(C,PX(3),PY(8),7*U,3*U,Leather);Fill(C,PX(3),PY(3),4*U,U,M);end;
+    'greaves':begin Fill(C,PX(2),PY(1),3*U,10*U,M);Fill(C,PX(7),PY(1),3*U,10*U,M);Line(C,PX(2),PY(5),PX(10),PY(5),1,$00303030);end;
+    'sandals':begin Fill(C,PX(2),PY(8),8*U,2*U,Wood);Line(C,PX(4),PY(8),PX(6),PY(4),1,M);Line(C,PX(8),PY(8),PX(6),PY(4),1,M);end;
   else Disc(C,PX(6),PY(6),3*U,M);end;
   C.Brush.Style:=bsSolid;
 end;
@@ -215,6 +243,10 @@ begin
     'blink':begin Line(C,PX(2),PY(6),PX(9),PY(6),U,$00F060C0);C.Brush.Color:=$00F060C0;C.Pen.Color:=$00F060C0;C.Polygon([Point(PX(8),PY(3)),Point(PX(11),PY(6)),Point(PX(8),PY(9))]);Fill(C,PX(2),PY(3),U,U,$00FFC0F0);Fill(C,PX(3),PY(9),U,U,$00FFC0F0);end;
     'fire_wave':begin C.Pen.Width:=U;C.Brush.Style:=bsClear;C.Pen.Color:=$0000A0FF;C.Arc(PX(1),PY(2),PX(7),PY(10),270*16,180*16);C.Pen.Color:=$000060E0;C.Arc(PX(4),PY(2),PX(10),PY(10),270*16,180*16);C.Pen.Width:=1;C.Brush.Style:=bsSolid;end;
     'drain_life':begin Disc(C,PX(4),PY(7),3*U,$002020B0);Line(C,PX(6),PY(4),PX(10),PY(1),U,$006060FF);Fill(C,PX(9),PY(1),2*U,U,$006060FF);end;
+    'blood_rage':begin Disc(C,PX(6),PY(6),4*U,$001010A0);Fill(C,PX(4),PY(4),U,2*U,$004040F0);Fill(C,PX(7),PY(4),U,2*U,$004040F0);Line(C,PX(4),PY(9),PX(8),PY(8),U,$004040F0);end;
+    'entangle':begin C.Pen.Width:=U;C.Brush.Style:=bsClear;C.Pen.Color:=$0030A040;C.Arc(PX(1),PY(3),PX(7),PY(11),0,180*16);C.Arc(PX(5),PY(1),PX(11),PY(9),180*16,180*16);C.Pen.Width:=1;C.Brush.Style:=bsSolid;Fill(C,PX(5),PY(8),2*U,3*U,$00306040);end;
+    'bone_spear':begin Line(C,PX(1),PY(11),PX(9),PY(3),U,$00D0E0E8);C.Brush.Color:=$00F0F8FF;C.Pen.Color:=$00F0F8FF;C.Polygon([Point(PX(11),PY(1)),Point(PX(8),PY(3)),Point(PX(10),PY(4))]);end;
+    'sanctuary':begin C.Brush.Style:=bsClear;C.Pen.Color:=$0060E0FF;C.Pen.Width:=U;C.Ellipse(PX(1),PY(3),PX(11),PY(11));C.Pen.Width:=1;C.Brush.Style:=bsSolid;Fill(C,PX(5),PY(1),2*U,6*U,$0060E0FF);Fill(C,PX(3),PY(3),6*U,2*U,$0060E0FF);end;
   else Disc(C,PX(6),PY(6),3*U,$00808080);end;
   C.Brush.Style:=bsSolid;
 end;

@@ -16,10 +16,11 @@ final class MagicTest extends TestCase
     public function test_spell_spends_mana_rewards_kill_once_and_recovers_mana(): void
     {
         $s=Game::command($this->arena(),'hero',['action'=>'cast','spell_id'=>'firebolt','target_id'=>'e0']);
-        self::assertSame(88,$s['players']['hero']['mana']);self::assertSame(0,$s['enemies']['e0']['hp']);
+        // Fire is an arcanist school: the bolt costs a quarter less (9 instead of 12).
+        self::assertSame(91,$s['players']['hero']['mana']);self::assertSame(0,$s['enemies']['e0']['hp']);
         self::assertSame(10,$s['players']['hero']['xp']);
         for ($i=0;$i<20;$i++) $s=Game::tick($s);
-        self::assertSame(94,$s['players']['hero']['mana']);
+        self::assertSame(97,$s['players']['hero']['mana']);
         $this->expectExceptionMessage('no_spell_target');
         Game::command($s,'hero',['action'=>'cast','spell_id'=>'firebolt','target_id'=>'e0']);
     }
@@ -40,9 +41,10 @@ final class MagicTest extends TestCase
     public function test_healing_frost_and_nova_apply_distinct_effects(): void
     {
         $s=$this->arena(240);$s['players']['hero']['hp']=30;
-        $heal=Game::command($s,'hero',['action'=>'cast','spell_id'=>'mend']);self::assertSame(70,$heal['players']['hero']['hp']);
+        // Arcane surge: the staff's 5 power counts as 7 in spells.
+        $heal=Game::command($s,'hero',['action'=>'cast','spell_id'=>'mend']);self::assertSame(72,$heal['players']['hero']['hp']);
         $frost=Game::command($s,'hero',['action'=>'cast','spell_id'=>'frost','target_id'=>'e0']);
-        self::assertSame(5,$frost['enemies']['e0']['hp']);self::assertSame(20,$frost['enemies']['e0']['ready_at']);
+        self::assertSame(3,$frost['enemies']['e0']['hp']);self::assertSame(20,$frost['enemies']['e0']['ready_at']);
         $s['enemies']['e1']=array_replace($s['enemies']['e0'],['id'=>'e1','x'=>5,'y'=>7]);
         $nova=Game::command($s,'hero',['action'=>'cast','spell_id'=>'nova']);
         self::assertSame(2,$nova['players']['hero']['kills']);self::assertCount(1,$nova['players']['hero']['loot']);

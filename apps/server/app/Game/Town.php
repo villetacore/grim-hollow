@@ -7,6 +7,9 @@ use Illuminate\Support\Str;
 
 final class Town
 {
+    public const BREW_GOLD = 10;
+    /** Changing an already chosen mentor costs gold; the first choice is free. */
+    public static function mentorCost(int $level): int { return 25*$level; }
     public static function ledger(string $id,string $reason,int $gold,int $materials,string $reference): void {
         DB::table('economy_ledger')->insert(['character_id'=>$id,'reason'=>$reason,'gold_delta'=>$gold,'materials_delta'=>$materials,'reference'=>$reference,'created_at'=>now()]);
     }
@@ -27,7 +30,12 @@ final class Town
             'talent_points'=>max(0,intdiv($sheet['level'],3)-array_sum($talents)),
             'recipes'=>collect(Catalog::recipes())->map(fn($r,$key)=>$r+array_intersect_key(Catalog::item($key),array_flip(['name','slot','level','damage','armor','power','hp','mana','icon']))),
             'forge'=>['limit'=>$sheet['forge_limit'],'bases'=>Catalog::bases(),'affixes'=>collect(Catalog::affixes())->map(fn($a)=>$a['name']),
+                'materials'=>Catalog::materials(),'runes'=>Catalog::runes(),
                 'costs'=>collect(range(1,$sheet['forge_limit']))->mapWithKeys(fn($t)=>[$t=>['plain'=>Catalog::forgeCost($t,false),'enchanted'=>Catalog::forgeCost($t,true)]])],
+            'alchemy'=>['reagents'=>collect(Catalog::reagents())->map(fn($r)=>['name'=>$r['name'],'aspect'=>$r['aspect']]),'have'=>$sheet['reagents'],
+                'elixirs'=>Catalog::elixirs(),'active'=>$sheet['elixir'],'price'=>self::BREW_GOLD],
+            'mentor'=>['level'=>Catalog::MENTOR_LEVEL,'current'=>$sheet['mentor'],'cost'=>$sheet['mentor']?self::mentorCost($sheet['level']):0,
+                'classes'=>collect(Catalog::classes())->map(fn($c)=>array_intersect_key($c,array_flip(['name','traits','schools','description'])))],
             'leaders'=>['depth'=>DB::table('characters')->where('best_depth','>',0)->orderByDesc('best_depth')->orderBy('name')->limit(10)->get(['name','class_id','best_depth']),
                 'duel'=>DB::table('characters')->where(fn($q)=>$q->where('duel_wins','>',0)->orWhere('duel_losses','>',0))->orderByDesc('rating')->orderBy('name')->limit(10)->get(['name','class_id','rating','duel_wins','duel_losses'])],
             'bounty'=>$sheet['bounty'],
@@ -81,25 +89,49 @@ final class Town
                 abort_unless($c->gold>=8,409,'not_enough_gold');abort_if($c->supplies>=30,409,'supply_limit');
                 DB::table('characters')->where('id',$id)->update(['gold'=>$c->gold-8,'supplies'=>$c->supplies+1]);self::ledger($id,'supply',-8,0,$ref);
             } elseif($action==='forge') {
-                $base=$d['target']??'';$tier=(int)($d['tier']??1);$affix=$d['text']??'';
-                abort_unless(isset(Catalog::bases()[$base])&&($affix===''||isset(Catalog::affixes()[$affix])),422,'invalid_recipe');
+                $base=$d['target']??'';$tier=(int)($d['tier']??1);$affix=$d['text']??'';$material=$d['material']??'';$rune=$d['rune']??'';
+                abort_unless(isset(Catalog::bases()[$base])&&($affix===''||isset(Catalog::affixes()[$affix]))&&
+                    ($material===''||isset(Catalog::materials()[$material]))&&($rune===''||isset(Catalog::runes()[$rune])),422,'invalid_recipe');
                 abort_unless($tier>=1&&$tier<=Catalog::forgeLimit(Catalog::progression((int)$c->xp)['level'],(int)$c->best_depth),409,'forge_limit');
-                $cost=Catalog::forgeCost($tier,$affix!=='');$this->pay($c,$cost,'forge',$ref);
+                $cost=Catalog::forgeCost($tier,$affix!=='');
+                if($material!=='') $cost['essence']+=Catalog::materials()[$material]['essence'];
+                if($rune!=='') $cost['essence']+=1;
+                $this->pay($c,$cost,'forge',$ref);
+                $this->payReagents($c,Catalog::reagentCost($tier,$material,$rune));
                 DB::table('characters')->where('id',$id)->increment('craft_xp');
-                (new Characters)->grant($id,$base.'+'.$tier.($affix!==''?'~'.$affix:''));
-            } elseif($action==='upgrade'||$action==='enchant') {
+                (new Characters)->grant($id,Catalog::itemKey($base,$tier,$material,$affix,$rune));
+            } elseif($action==='upgrade'||$action==='enchant'||$action==='inscribe') {
                 $item=DB::table('character_items')->where('id',$d['target']??'')->where('character_id',$id)->where('escrow',false)->first();
                 abort_unless($item,404,'item_not_found');$def=Catalog::item($item->definition);abort_unless($def['generated'],409,'unique_item');
                 if($action==='upgrade') {
                     abort_unless($def['tier']<999,409,'forge_limit');
                     $this->pay($c,Catalog::upgradeCost($def['tier']),'upgrade',$ref);
-                    $key=$def['icon'].'+'.($def['tier']+1).($def['affix']!==''?'~'.$def['affix']:'');
-                } else {
+                    $key=Catalog::itemKey($def['base'],$def['tier']+1,$def['material'],$def['affix'],$def['rune']);
+                } elseif($action==='enchant') {
                     $affix=$d['text']??'';abort_unless(isset(Catalog::affixes()[$affix]),422,'invalid_recipe');
                     $this->pay($c,Catalog::enchantCost($def['tier']),'enchant',$ref);
-                    $key=$def['icon'].'+'.$def['tier'].'~'.$affix;
+                    $key=Catalog::itemKey($def['base'],$def['tier'],$def['material'],$affix,$def['rune']);
+                } else {
+                    $rune=$d['text']??'';abort_unless(isset(Catalog::runes()[$rune]),422,'invalid_recipe');
+                    $this->pay($c,Catalog::inscribeCost($def['tier']),'inscribe',$ref);
+                    $this->payReagents($c,Catalog::reagentCost($def['tier'],'',$rune));
+                    $key=Catalog::itemKey($def['base'],$def['tier'],$def['material'],$def['affix'],$rune);
                 }
                 DB::table('character_items')->where('id',$item->id)->update(['definition'=>$key]);
+            } elseif($action==='brew') {
+                try { $elixir=Catalog::elixir($d['text']??''); } catch(\DomainException) { abort(422,'invalid_recipe'); }
+                $need=[];foreach(explode('+',$elixir['key']) as $part) $need[$part]=($need[$part]??0)+1;
+                abort_unless($c->gold>=self::BREW_GOLD,409,'not_enough_gold');
+                $this->payReagents($c,$need);
+                DB::table('characters')->where('id',$id)->update(['gold'=>$c->gold-self::BREW_GOLD,'elixir'=>$elixir['key']]);
+                self::ledger($id,'brew',-self::BREW_GOLD,0,$ref);
+            } elseif($action==='mentor') {
+                $mentor=$d['target']??'';abort_unless(isset(Catalog::classes()[$mentor])&&$mentor!==$c->class_id,422,'invalid_mentor');
+                $level=Catalog::progression((int)$c->xp)['level'];abort_unless($level>=Catalog::MENTOR_LEVEL,409,'level_required');
+                abort_if($c->mentor===$mentor,409,'mentor_already');
+                $price=$c->mentor?self::mentorCost($level):0;abort_unless($c->gold>=$price,409,'not_enough_gold');
+                DB::table('characters')->where('id',$id)->update(['mentor'=>$mentor,'gold'=>$c->gold-$price]);
+                if($price>0) self::ledger($id,'mentor',-$price,0,$ref);
             } elseif($action==='distill') {
                 abort_unless($c->gold>=20&&$c->materials>=10,409,'not_enough_resources');
                 DB::table('characters')->where('id',$id)->update(['gold'=>$c->gold-20,'materials'=>$c->materials-10,'essence'=>$c->essence+1]);
@@ -121,6 +153,15 @@ final class Town
             DB::table('character_operations')->insert(['character_id'=>$id,'operation_id'=>$ref,'payload_hash'=>$hash]);
         },5);
         return $this->overview($account,$id);
+    }
+    /** Takes reagents from the hero: the whole set or nothing. */
+    private function payReagents(object $c,array $need): void {
+        if(!$need) return;
+        $have=Characters::reagents($c);
+        foreach($need as $key=>$n) abort_unless(($have[$key]??0)>=$n,409,'not_enough_reagents');
+        foreach($need as $key=>$n) $have[$key]-=$n;
+        $have=array_filter($have,fn($n)=>$n>0);ksort($have);
+        DB::table('characters')->where('id',$c->id)->update(['reagents'=>$have?json_encode($have):null]);
     }
     private function pay(object $c,array $cost,string $reason,string $ref): void {
         abort_unless($c->gold>=$cost['gold']&&$c->materials>=$cost['materials']&&$c->essence>=$cost['essence'],409,'not_enough_resources');
