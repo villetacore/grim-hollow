@@ -54,18 +54,21 @@ final class GameController
 
     public function characters(Request $r)
     {
-        return ['items' => DB::table('characters')->where('user_id', $r->attributes->get('account_id'))->get(['id', 'name', 'class_id', 'gold', 'xp', 'active_expedition'])];
+        return ['items' => DB::table('characters')->where('user_id', $r->attributes->get('account_id'))->get(['id', 'name', 'class_id', 'origin', 'gold', 'xp', 'active_expedition'])];
     }
 
     public function createCharacter(Request $r)
     {
-        $d = $r->validate(['name' => ['required', 'string', 'min:3', 'max:24', 'regex:/^[\pL][\pL\pN_]+$/u', 'unique:characters,name'], 'class_id'=>'sometimes|in:guardian,arcanist,ranger,warden']);
+        $d = $r->validate(['name' => ['required', 'string', 'min:3', 'max:24', 'regex:/^[\pL][\pL\pN_]+$/u', 'unique:characters,name'],
+            'class_id'=>'sometimes|in:'.implode(',',array_keys(\GrimHollow\Core\Catalog::classes())),
+            'origin'=>'sometimes|in:'.implode(',',array_keys(\GrimHollow\Core\Catalog::origins()))]);
         $id = (string) Str::ulid();
         DB::transaction(function() use($id,$r,$d) {
             $account=$r->attributes->get('account_id');
             DB::table('users')->where('id',$account)->lockForUpdate()->first();
             abort_if(DB::table('characters')->where('user_id',$account)->count()>=8,409,'character_limit');
-            DB::table('characters')->insert(['id' => $id, 'user_id' => $account, 'name' => $d['name'], 'class_id'=>$d['class_id']??'guardian', 'created_at' => now(), 'updated_at' => now()]);
+            DB::table('characters')->insert(['id' => $id, 'user_id' => $account, 'name' => $d['name'], 'class_id'=>$d['class_id']??'guardian',
+                'origin'=>$d['origin']??'human', 'created_at' => now(), 'updated_at' => now()]);
             (new \App\Game\Characters)->starter(DB::table('characters')->where('id',$id)->first());
         },3);
 

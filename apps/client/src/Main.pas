@@ -2,7 +2,7 @@ unit Main;
 {$mode objfpc}{$H+}{$codepage utf8}
 interface
 uses Classes, SysUtils, Forms, Controls, Graphics, StdCtrls, ExtCtrls, Dialogs,
-  LCLType, LMessages, ComCtrls, fpjson, jsonparser, GameProtocol, GameTransport, GameTheme, GameData, GameRenderer, GameArt, TownWindow, NativeNetwork, FieldGuide, URIParser, ClientUpdate;
+  LCLType, LMessages, ComCtrls, fpjson, jsonparser, GameProtocol, GameTransport, GameTheme, GameData, GameRenderer, GameArt, TownWindow, NativeNetwork, FieldGuide, URIParser, ClientUpdate, PlazaRender, Math;
 
 type
   TGameMap = class(TCustomControl)
@@ -61,6 +61,25 @@ type
     FMode:TComboBox;
     FBagSpecs:TStringList;
     FManualUpdate:Boolean;
+    // Creation choices, the mentor picker and the areas sent by the server.
+    FOrigin,FMentor:TComboBox;
+    FBiomeKeys:TStringList;
+    // The walkable town square: static map, latest live view, the predicted own cell,
+    // steps not yet confirmed, the last keeper's words and a service to open.
+    FPlazaTown,FPlaza:TJSONData;
+    FPlazaX,FPlazaY:Integer;
+    FPlazaOutbox:TStringList;
+    FPlazaInFlight:Boolean;
+    FPlazaStepAt,FPlazaSentAt,FPlazaPollAt,FTalkUntil:QWord;
+    FPlazaHeld,FPlazaAsk,FTalk,FService:string;
+    FPlazaView:TPlazaView;
+    function PlazaActive:Boolean;
+    procedure PlazaStep(const Direction:string);
+    procedure PlazaAct(const ActionName,Target:string);
+    procedure FlushPlaza;
+    procedure ResetPlaza;
+    procedure OpenTown(Tab:Integer);
+    procedure OpenService(const Service:string);
     procedure UpdateDone(const Info:TUpdateInfo;Installed:Boolean;const Message:string);
     procedure SelfUpdateTest;
     function Hostiles(W:TJSONData):TJSONArray;
@@ -127,7 +146,77 @@ end;
 {$I GamePanels.inc}
 
 destructor TGameForm.Destroy;
-begin FWorld.Free;FSnapshot.Free; FSheet.Free; FCharacters.Free; FBagSpecs.Free; inherited Destroy; end;
+begin FWorld.Free;FSnapshot.Free; FSheet.Free; FCharacters.Free; FBagSpecs.Free; FBiomeKeys.Free;
+  FPlazaTown.Free; FPlaza.Free; FPlazaOutbox.Free; inherited Destroy; end;
+
+{ The square is live while a hero stands in town (the smoke test keeps the plain town scene). }
+function TGameForm.PlazaActive:Boolean;
+begin Result:=not FSmoke and (FToken<>'') and (FHero<>'') and (FExpedition='') and (FSheet<>nil); end;
+
+procedure TGameForm.ResetPlaza;
+begin
+  FreeAndNil(FPlaza);FPlazaX:=-1;FPlazaY:=-1;FPlazaOutbox.Clear;FPlazaInFlight:=False;
+  FPlazaHeld:='';FPlazaAsk:='';FTalk:='';FService:='';
+end;
+
+{ Moves the own hero at once and queues the step for the server, which confirms or snaps back. }
+procedure TGameForm.PlazaStep(const Direction:string);
+var NX,NY:Integer;
+begin
+  if (FPlazaTown=nil) or (FPlaza=nil) or (FPlazaX<0) then Exit;
+  if GetTickCount64-FPlazaStepAt<120 then begin FPlazaHeld:=Direction;Exit;end;
+  FPlazaHeld:='';NX:=FPlazaX;NY:=FPlazaY;
+  case Direction of 'north':Dec(NY);'south':Inc(NY);'west':Dec(NX);'east':Inc(NX);else Exit;end;
+  if not PlazaWalkable(FPlazaTown,FPlaza,NX,NY) then Exit;
+  FPlazaX:=NX;FPlazaY:=NY;FPlazaStepAt:=GetTickCount64;
+  if FPlazaOutbox.Count<6 then FPlazaOutbox.Add(Direction);
+  FlushPlaza;FMap.Invalidate;
+end;
+
+{ Sends the oldest queued step, never two closer than the server's pace allows. }
+procedure TGameForm.FlushPlaza;
+var D:TJSONObject;Direction:string;
+begin
+  if FBusy or FPlazaInFlight or (FPlazaOutbox.Count=0) or (GetTickCount64-FPlazaSentAt<90) then Exit;
+  Direction:=FPlazaOutbox[0];FPlazaOutbox.Delete(0);
+  FPlazaInFlight:=True;FPlazaSentAt:=GetTickCount64;
+  D:=TJSONObject.Create(['action','move','direction',Direction]);
+  try Send('POST','characters/'+FHero+'/plaza',D.AsJSON,'plaza_move');finally D.Free;end;
+  if not FBusy then FPlazaInFlight:=False;
+end;
+
+{ Talking and emotes: one request; while another is in flight it waits in FPlazaAsk. }
+procedure TGameForm.PlazaAct(const ActionName,Target:string);
+var D:TJSONObject;
+begin
+  if FBusy then begin FPlazaAsk:=ActionName+'|'+Target;Exit;end;
+  FPlazaAsk:='';
+  D:=TJSONObject.Create(['action',ActionName,'target',Target]);
+  try Send('POST','characters/'+FHero+'/plaza',D.AsJSON,'plaza_'+ActionName);finally D.Free;end;
+end;
+
+procedure TGameForm.OpenTown(Tab:Integer);
+var Town:TTownForm;
+begin
+  if FHero='' then begin FTabs.ActivePage:=FAccountTab;FStatus.Caption:='Сначала войдите и выберите героя.';Exit;end;
+  if FExpedition<>'' then begin FStatus.Caption:='Городские службы доступны после возвращения из похода.';Exit;end;
+  FTimer.Enabled:=False;Town:=TTownForm.CreateTown(Self,FServer.Text,FToken,FHero,Tab);
+  try Town.ShowModal;if FSmoke and (Town.LastError<>'') then SmokeResult('PASCAL_SMOKE_FAILED town '+Town.LastError,True);
+  finally Town.Free;FTimer.Enabled:=True;end;
+  RefreshSheet;
+end;
+
+{ What a keeper's conversation opens. }
+procedure TGameForm.OpenService(const Service:string);
+begin
+  case Service of
+    'forge':OpenTown(0);'market':OpenTown(1);'guild':OpenTown(2);'bounty','temple':OpenTown(3);'alchemy':OpenTown(4);
+    'mentor':begin FTabs.ActivePage:=FHeroTab;FStatus.Caption:='Выберите наставника во вкладке «Герой» (с '+JStr(FSheet,'mentor_level','10')+' уровня).';end;
+    'gate':begin FTabs.ActivePage:=FTripTab;FMode.ItemIndex:=0;FStatus.Caption:='Выберите область и нажмите «Подготовить». В группе до '+JStr(FSheet,'max_party','8')+' героев.';end;
+    'arena':begin FTabs.ActivePage:=FTripTab;FMode.ItemIndex:=1;FStatus.Caption:='Режим дуэли выбран: «Подготовить», затем передайте код сопернику.';end;
+    'library':ShowFieldGuide(Self);
+  end;
+end;
 
 { Everything the hero may strike: monsters, plus the other duelists in a duel. Caller frees. }
 function TGameForm.Hostiles(W:TJSONData):TJSONArray;
@@ -394,6 +483,16 @@ end;
 procedure TGameForm.MapMouse(Sender: TObject; Button: TMouseButton; Shift: TShiftState; X,Y: Integer);
 var CX,CY,I:Integer;List:TJSONArray;E:TJSONData;
 begin
+  if PlazaActive and (FPlazaView.S>0) then begin
+    FocusGame;
+    CX:=FPlazaView.LeftCell+(X-FPlazaView.OX) div FPlazaView.S;CY:=FPlazaView.TopCell+(Y-FPlazaView.OY) div FPlazaView.S;
+    E:=NearestNpc(FPlaza,CX,CY,0);
+    if E<>nil then begin
+      if Abs(JInt(E,'x')-FPlazaX)+Abs(JInt(E,'y')-FPlazaY)<=2 then PlazaAct('talk',JStr(E,'id'))
+      else FStatus.Caption:=JStr(E,'name')+': подойдите ближе, чтобы поговорить.';
+    end;
+    Exit;
+  end;
   if (FExpedition='') and (FHero<>'') then begin ButtonClick(FindComponent('TownButton'));Exit;end;
   FocusGame;
   if (FSnapshot=nil) or (FView.S=0) or (X<FView.OX) or (Y<FView.OY) then Exit;
@@ -453,7 +552,7 @@ begin
 end;
 
 procedure TGameForm.ButtonClick(Sender: TObject);
-var ButtonName, Kind, Value: string; D: TJSONObject; Town:TTownForm;
+var ButtonName, Kind, Value: string; D: TJSONObject;
 begin
   ButtonName:=(Sender as TButton).Name;
   if ButtonName='GuideButton' then begin ShowFieldGuide(Self);Exit;end;
@@ -466,13 +565,12 @@ begin
     FStatus.Caption:='Действие принято. Ожидаем ответ сервера…';
     Exit;
   end;
-  if ButtonName='TownButton' then begin
-    if FHero='' then begin FTabs.ActivePage:=FAccountTab;FStatus.Caption:='Сначала войдите и выберите героя.';Exit;end;
-    if FExpedition<>'' then begin FStatus.Caption:='Городские службы доступны после возвращения из похода.';Exit;end;
-    FTimer.Enabled:=False;Town:=TTownForm.CreateTown(Self,FServer.Text,FToken,FHero);
-    try Town.ShowModal;if FSmoke and (Town.LastError<>'') then SmokeResult('PASCAL_SMOKE_FAILED town '+Town.LastError,True);
-    finally Town.Free;FTimer.Enabled:=True;end;
-    RefreshSheet;Exit;
+  if ButtonName='TownButton' then begin OpenTown(0);Exit;
+  end else if ButtonName='MentorButton' then begin
+    if (FSheet=nil) or (FMentor.ItemIndex<0) then Exit;
+    if FExpedition<>'' then begin FStatus.Caption:='Наставника выбирают в городе.';Exit;end;
+    D:=TJSONObject.Create(['operation_id',NewCommandId,'action','mentor','target',ClassKeys[FMentor.ItemIndex]]);
+    try Send('POST','characters/'+FHero+'/town',D.AsJSON,'mentor');finally D.Free;end;Exit;
   end else if ButtonName='ReportButton' then begin
     if FToken='' then Exit;
     Value:='';Kind:='';
@@ -516,13 +614,13 @@ begin
     try Send('POST','auth/'+Kind,D.AsJSON,'auth'); finally D.Free; end;
   end else if ButtonName='HeroButton' then begin
     if FExpedition<>'' then begin FStatus.Caption:='Сначала завершите поход.';Exit;end;
-    case FClass.ItemIndex of 1:Value:='arcanist';2:Value:='ranger';3:Value:='warden';else Value:='guardian';end;
-    D:=TJSONObject.Create(['name',FName.Text,'class_id',Value]);
+    Value:=ClassKeys[Max(0,FClass.ItemIndex)];
+    D:=TJSONObject.Create(['name',FName.Text,'class_id',Value,'origin',OriginKeys[Max(0,FOrigin.ItemIndex)]]);
     try Send('POST','characters',D.AsJSON,'hero'); finally D.Free; end;
   end else if ButtonName='ExpeditionButton' then begin
     if FHero='' then begin FStatus.Caption:='Сначала создайте героя или войдите.'; Exit; end;
     D:=TJSONObject.Create(['character_id',FHero]);
-    case FBiome.ItemIndex of 1:Value:='monastery';2:Value:='roots';3:Value:='catacombs';4:Value:='glacier';5:Value:='citadel';else Value:='mines';end;
+    if (FBiome.ItemIndex>=0) and (FBiome.ItemIndex<FBiomeKeys.Count) then Value:=FBiomeKeys[FBiome.ItemIndex] else Value:='mines';
     D.Add('biome',Value);
     if (FMode<>nil) and (FMode.ItemIndex=1) and (Trim(FCode.Text)='') then D.Add('mode','duel');
     if Trim(FCode.Text)<>'' then D.Add('join_code',Trim(FCode.Text));
@@ -553,13 +651,20 @@ begin
   FBusy:=False;
   if Kind='poll' then FAwaitingStream:=0;
   FHeroes.Enabled:=FExpedition='';
+  if (Error<>'') and (Copy(Kind,1,5)='plaza') and (Pos('HTTP 401',Error)=0) then begin
+    FPlazaInFlight:=False;
+    if Kind='plaza_talk' then FStatus.Caption:=FriendlyError(Error);
+    if Kind='plaza_move' then begin FPlazaOutbox.Clear;if FPlaza<>nil then begin FPlazaX:=JInt(FPlaza,'self.x');FPlazaY:=JInt(FPlaza,'self.y');end;end;
+    if Pos('in_expedition',Error)>0 then begin ResetPlaza;RefreshSheet;end;
+    Exit;
+  end;
   if Error<>'' then begin
     FPendingAction:=''; FPendingButton:='';
     FStatus.Caption:=FriendlyError(Error);
     if Kind='ticket' then FReconnectAt:=GetTickCount64+10000;
     if Kind='refresh' then FSessionUntil:=GetTickCount64+90000;
     if Pos('HTTP 401',Error)>0 then begin
-      FExpedition:='';FToken:='';FHero:='';FHeroes.Enabled:=True;
+      FExpedition:='';FToken:='';FHero:='';FHeroes.Enabled:=True;ResetPlaza;
       FreeAndNil(FSnapshot);FreeAndNil(FSheet);FMap.Invalidate;
       FServer.Enabled:=True;FEmail.Enabled:=True;FPassword.Enabled:=True;FName.Enabled:=True;FCode.ReadOnly:=False;
       FTabs.ActivePage:=FAccountTab;
@@ -568,7 +673,7 @@ begin
     Exit;
   end;
   if Kind='logout' then begin
-    FToken:='';FHero:='';FHeroes.Clear;FChat.Clear;FBag.Clear;FSpells.Clear;
+    FToken:='';FHero:='';FHeroes.Clear;FChat.Clear;FBag.Clear;FSpells.Clear;ResetPlaza;
     FreeAndNil(FSheet);FreeAndNil(FCharacters);FStats.Caption:='Вы вышли из аккаунта.';
     FreeAndNil(FSnapshot);FMap.Invalidate;FPendingAction:='';FPendingButton:='';
     FItemInfo.Caption:='Выберите персонажа.';FSpellInfo.Caption:='Выберите персонажа.';
@@ -579,7 +684,25 @@ begin
   D:=nil;
   try
     D:=GetJSON(Response);
-    if Kind='refresh' then begin
+    if Copy(Kind,1,5)='plaza' then begin
+      if Kind='plaza_move' then FPlazaInFlight:=False;
+      if (Kind='plaza_full') or (FPlazaTown=nil) then begin
+        if D.FindPath('map')<>nil then begin FPlazaTown.Free;FPlazaTown:=D.Clone;end;
+      end;
+      if (Kind='plaza_move') and (JStr(D,'result')<>'ok') then begin
+        // The server refused the step: snap to its position and forget the queued ones.
+        FPlazaOutbox.Clear;FPlazaX:=-1;
+      end;
+      if (FPlazaX<0) or ((FPlazaOutbox.Count=0) and not FPlazaInFlight and (GetTickCount64-FPlazaStepAt>400)) then begin
+        FPlazaX:=JInt(D,'self.x');FPlazaY:=JInt(D,'self.y');end;
+      if D.FindPath('talk')<>nil then begin
+        FTalk:=JStr(D,'talk.name')+': '+JStr(D,'talk.line');FTalkUntil:=GetTickCount64+10000;FService:=JStr(D,'talk.service');
+      end;
+      FPlaza.Free;FPlaza:=D;D:=nil;FPlazaPollAt:=GetTickCount64;
+      FMap.Invalidate;
+    end else if Kind='mentor' then begin
+      FStatus.Caption:='Наставник выбран: его черты и школы магии теперь ваши.';RefreshSheet;
+    end else if Kind='refresh' then begin
       FToken:=JStr(D,'access_token');FSessionUntil:=GetTickCount64+QWord(JInt(D,'expires_in',28800))*1000;
       FreeAndNil(FWorld);FStreamSeen:=False;FStreamSnapshot:='';FWsInFlight:=False;
     end else if Kind='auth' then begin
@@ -651,7 +774,7 @@ begin
         FreeAndNil(FWorld);FStreamSeen:=False;FWorld:=TWorldConnection.Create(SocketUrl,JStr(D,'ticket'),@WorldMessage);
       end;
     end else if Kind='expedition' then begin
-      FExpedition:=D.FindPath('id').AsString; FCode.Text:=D.FindPath('join_code').AsString;
+      FExpedition:=D.FindPath('id').AsString; FCode.Text:=D.FindPath('join_code').AsString;ResetPlaza;
       FHeroes.Enabled:=False;if FChannel.ItemIndex=1 then ChannelChanged(nil);
       FTabs.ActivePage:=FTripTab;
       FStatus.Caption:='Код группы: '+FCode.Text+'. Передайте его второму игроку, затем начните.';
@@ -765,6 +888,16 @@ begin
     Payload:=FStreamSnapshot;FStreamSnapshot:='';Received('poll',Payload,'');
     if FBusy then Exit;
   end;
+  if PlazaActive then begin
+    if FService<>'' then begin Payload:=FService;FService:='';OpenService(Payload);Exit;end;
+    if (FPlazaHeld<>'') and (GetTickCount64-FPlazaStepAt>=120) then PlazaStep(FPlazaHeld);
+    FlushPlaza;if FBusy then Exit;
+    if FPlazaAsk<>'' then begin Payload:=FPlazaAsk;PlazaAct(Copy(Payload,1,Pos('|',Payload)-1),Copy(Payload,Pos('|',Payload)+1,40));if FBusy then Exit;end;
+    if (FTalk<>'') and (GetTickCount64>FTalkUntil) then begin FTalk:='';FMap.Invalidate;end;
+    if FPlazaTown=nil then begin Send('GET','characters/'+FHero+'/plaza?full=1','','plaza_full');Exit;end;
+    if (FPlazaOutbox.Count=0) and not FPlazaInFlight and (GetTickCount64-FPlazaPollAt>=300) then begin
+      FPlazaPollAt:=GetTickCount64;Send('GET','characters/'+FHero+'/plaza','','plaza');Exit;end;
+  end;
   Inc(FPollCounter);
   if not FSmoke and (FHero<>'') and (FPollCounter mod 20=0) then begin ReadChat;if FBusy then Exit;end;
   if FSmoke and (FToken='') then ButtonClick(FindComponent('RegisterButton'))
@@ -810,7 +943,7 @@ begin
   if ActionName='cast' then begin
     P.Add('spell_id',Direction);Kind:='';
     if FSheet<>nil then begin Kind:=JStr(FSheet,'spells.'+Direction+'.kind');Range:=JInt(FSheet,'spells.'+Direction+'.range',6);end else Range:=6;
-    if (Direction='mend') and (JStr(W,'self.class_id')='warden') then begin
+    if (Direction='mend') and HasTrait(W.FindPath('self'),'ally_heal') then begin
       Players:=W.FindPath('players');Target:=FHero;BestDistance:=101;
       for I:=0 to Players.Count-1 do begin E:=Players.Items[I];
         if (JInt(E,'hp')>0) and (Abs(JInt(E,'x')-JInt(W,'self.x'))+Abs(JInt(E,'y')-JInt(W,'self.y'))<=3) then begin
@@ -828,7 +961,7 @@ begin
     if (Kind='wave') or (Kind='blink') then P.Add('direction',FFacing);
   end else if Direction<>'' then P.Add('direction',Direction);
   if (ActionName='attack') or (ActionName='bash') then begin
-    if (ActionName='attack') and (JStr(W,'self.class_id')='ranger') then Target:=PickTarget(W,5,False)
+    if (ActionName='attack') and HasTrait(W.FindPath('self'),'ranged') then Target:=PickTarget(W,5,False)
     else Target:=PickTarget(W,1,True);
     if Target='' then begin P.Free; FStatus.Caption:='Нет противника в радиусе атаки. Подойдите вплотную или выберите цель.'; Exit; end;
     P.Add('target_id',Target);
@@ -856,6 +989,17 @@ begin
   if (ActiveControl is TEdit) and (ActiveControl<>FCode) then Exit;
   if (ActiveControl is TComboBox) or (ActiveControl is TMemo) or (ActiveControl is TListBox) then Exit;
   if (ActiveControl=FCode) and not FCode.ReadOnly then Exit;
+  if PlazaActive then begin
+    case Key of
+      VK_W,VK_UP:PlazaStep('north');VK_S,VK_DOWN:PlazaStep('south');VK_A,VK_LEFT:PlazaStep('west');VK_D,VK_RIGHT:PlazaStep('east');
+      VK_F,VK_SPACE,VK_E:begin
+        if NearestNpc(FPlaza,FPlazaX,FPlazaY,2)<>nil then PlazaAct('talk',JStr(NearestNpc(FPlaza,FPlazaX,FPlazaY,2),'id'))
+        else FStatus.Caption:='Рядом никого нет. Подойдите к жителю города.';end;
+      VK_1:PlazaAct('emote','wave');VK_2:PlazaAct('emote','bow');VK_3:PlazaAct('emote','cheer');VK_4:PlazaAct('emote','dance');VK_5:PlazaAct('emote','sit');
+      VK_T:ButtonClick(FindComponent('TownButton'));
+    else Exit;end;
+    Key:=0;Exit;
+  end;
   case Key of
     VK_W,VK_UP: Action('move','north'); VK_S,VK_DOWN: Action('move','south');
     VK_A,VK_LEFT: Action('move','west'); VK_D,VK_RIGHT: Action('move','east');
@@ -864,6 +1008,7 @@ begin
     VK_4: Action('cast','firebolt');VK_5: Action('cast','mend');VK_6: Action('cast','frost');VK_7: Action('cast','nova');
     VK_8: Action('cast','venom');VK_9: Action('cast','chain');VK_0: Action('cast','barrier');VK_Q: Action('cast','meteor');
     VK_Z: Action('cast','blink');VK_C: Action('cast','fire_wave');VK_V: Action('cast','whirlwind');VK_G: Action('cast','drain_life');
+    VK_B: Action('cast','blood_rage');VK_N: Action('cast','entangle');VK_M: Action('cast','bone_spear');VK_H: Action('cast','sanctuary');
     VK_TAB: CycleTarget;
     VK_F: Action('interact','');
     VK_T:ButtonClick(FindComponent('TownButton'));
@@ -874,6 +1019,9 @@ end;
 
 procedure TGameForm.Draw(Sender:TObject);
 begin
+  if PlazaActive and (FPlazaTown<>nil) and (FPlaza<>nil) and (FPlazaX>=0) then begin
+    RenderPlaza(FMap.Canvas,FMap.Width,FMap.Height,FPlaza,FPlazaTown,FHero,FTalk,FPlazaX,FPlazaY,GetTickCount64,FPlazaView);Exit;end;
+  FPlazaView.S:=0;
   FView.Hero:=FHero;FView.Expedition:=FExpedition;FView.Target:=FTarget;FView.Sheet:=FSheet;FView.EstTick:=EstimatedTick;
   RenderMap(FMap.Canvas,FMap.Width,FMap.Height,FSnapshot,FView);
 end;

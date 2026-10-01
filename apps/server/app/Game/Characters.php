@@ -12,7 +12,7 @@ final class Characters
     public function starter(object $c): void
     {
         if ($c->starter_granted) return;
-        $weapon=match($c->class_id){'arcanist'=>'oak_staff','ranger'=>'hunting_bow','warden'=>'healer_mace',default=>'iron_sword'};
+        $weapon=Catalog::classes()[$c->class_id]['weapon']??'iron_sword';
         foreach ([$weapon,'leather','buckler','ember_ring'] as $key) {
             $this->grant($c->id,$key,$key==='ember_ring'?null:Catalog::item($key)['slot'],true);
         }
@@ -26,14 +26,22 @@ final class Characters
     public static function describe(string $key): array
     {
         $item=Catalog::item($key);
-        if ($item['generated']) $item+=['upgrade_cost'=>Catalog::upgradeCost($item['tier']),'enchant_cost'=>Catalog::enchantCost($item['tier'])];
+        if ($item['generated']) $item+=['upgrade_cost'=>Catalog::upgradeCost($item['tier']),'enchant_cost'=>Catalog::enchantCost($item['tier']),
+            'inscribe_cost'=>Catalog::inscribeCost($item['tier'])];
         return $item;
     }
-    public function profile(object $c): array
+    public static function reagents(object $c): array
+    {
+        return array_filter(json_decode($c->reagents??'{}',true)?:[],fn($n)=>$n>0);
+    }
+    /** Combat profile of a hero. Duels leave the elixir out: the arena is a fair fight. */
+    public function profile(object $c,bool $elixir=true): array
     {
         $equipment=DB::table('character_items')->where('character_id',$c->id)->whereNotNull('equipped_slot')->pluck('definition','equipped_slot')->all();
-        $profile=Catalog::profile($c->name,$c->class_id,(int)$c->xp,(array)$c,$equipment)+['potions'=>3+min(3,(int)$c->supplies)];
-        foreach(json_decode($c->talents??'{}',true) as $key=>$rank){$talent=Catalog::talents()[$key];$profile[$talent['stat']]+=$talent['amount']*$rank;}
+        ksort($equipment);
+        $profile=Catalog::profile($c->name,$c->class_id,(int)$c->xp,(array)$c,$equipment,
+            ['origin'=>$c->origin??'human','mentor'=>$c->mentor??null,'elixir'=>$elixir?($c->elixir??null):null])+['potions'=>3+min(3,(int)$c->supplies)];
+        foreach(json_decode($c->talents??'{}',true) as $key=>$rank){$talent=Catalog::talents()[$key]??null;if($talent)$profile[$talent['stat']]+=$talent['amount']*$rank;}
         return $profile;
     }
     public function sheet(int $account,string $id): array
@@ -43,14 +51,22 @@ final class Characters
             abort_unless($c,404,'character_not_found'); $this->starter($c);
             $progress=Catalog::progression((int)$c->xp);
             $items=DB::table('character_items')->where('character_id',$id)->where('escrow',false)->orderBy('created_at')->orderBy('id')->get()->map(fn($i)=>(array)$i+self::describe($i->definition));
-            return ['id'=>$id,'name'=>$c->name,'class_id'=>$c->class_id,'gold'=>(int)$c->gold,'xp'=>(int)$c->xp,
+            $stats=$this->profile($c);
+            // Spell costs as this hero pays them: schools of the class and the mentor are cheaper.
+            $spells=collect(Catalog::spells())->map(fn($s)=>array_replace($s,['mana'=>Catalog::spellCost($s,$stats['schools']),
+                'affinity'=>in_array($s['school'],$stats['schools'],true)]))->all();
+            return ['id'=>$id,'name'=>$c->name,'class_id'=>$c->class_id,'origin'=>$c->origin??'human','mentor'=>$c->mentor,
+                'gold'=>(int)$c->gold,'xp'=>(int)$c->xp,
                 'active_expedition'=>$c->active_expedition,'campaign'=>$c->campaign,'materials'=>$c->materials,'essence'=>(int)($c->essence??0),
+                'reagents'=>(object)self::reagents($c),'elixir'=>$c->elixir?Catalog::elixir($c->elixir):null,
                 'bounty'=>$c->bounty?json_decode($c->bounty,true):null,'best_depth'=>(int)$c->best_depth,'rating'=>(int)$c->rating,
                 'duel_wins'=>(int)$c->duel_wins,'duel_losses'=>(int)$c->duel_losses,
                 'forge_limit'=>Catalog::forgeLimit($progress['level'],(int)$c->best_depth),'supplies'=>$c->supplies,'craft_xp'=>$c->craft_xp,
-                'biomes'=>Catalog::biomes(),'attributes'=>['strength'=>$c->strength,'vitality'=>$c->vitality,'intellect'=>$c->intellect],
+                'biomes'=>Catalog::biomes(),'classes'=>Catalog::classes(),'origins'=>Catalog::origins(),'traits'=>Catalog::traits(),
+                'schools'=>Catalog::schools(),'mentor_level'=>Catalog::MENTOR_LEVEL,'max_party'=>\GrimHollow\Core\Game::MAX_PARTY,
+                'attributes'=>['strength'=>$c->strength,'vitality'=>$c->vitality,'intellect'=>$c->intellect],
                 'points'=>max(0,($progress['level']-1)*2-$c->strength-$c->vitality-$c->intellect),
-                'stats'=>$this->profile($c),'items'=>$items,'spells'=>Catalog::spells(),'enemies'=>Catalog::enemies(),'objects'=>Catalog::objects()]+$progress;
+                'stats'=>$stats,'items'=>$items,'spells'=>$spells,'enemies'=>Catalog::enemies(),'objects'=>Catalog::objects()]+$progress;
         },3);
     }
     public function manage(int $account,string $id,array $d): array

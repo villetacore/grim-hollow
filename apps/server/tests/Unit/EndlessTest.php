@@ -53,7 +53,7 @@ final class EndlessTest extends TestCase
         $profile=Catalog::profile('H','ranger',0,[],['weapon'=>'dagger+3~vampiric','ring'=>'ring+2']);
         self::assertSame([6,5],[$profile['crit'],$profile['leech']]);
         $key=Catalog::generate(new Random(3),4,true,'arcanist');
-        self::assertMatchesRegularExpression('/^[a-z]+\+4~[a-z]+$/',$key);Catalog::item($key);
+        self::assertMatchesRegularExpression('/^[a-z]+\+4(@[a-z]+)?~[a-z]+$/',$key);Catalog::item($key);
         self::assertSame(['gold'=>128,'materials'=>6,'essence'=>2],Catalog::forgeCost(4,true));
     }
 

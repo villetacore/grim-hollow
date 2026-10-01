@@ -15,8 +15,9 @@ type
   end;
 const
   { Action bar: key label, skill id (spells use their catalog key). }
-  BarKeys:array[0..15] of string=('Sp','1','2','3','4','5','6','7','8','9','0','Q','Z','C','V','G');
-  BarSkills:array[0..15] of string=('attack','bash','guard','potion','firebolt','mend','frost','nova','venom','chain','barrier','meteor','blink','fire_wave','whirlwind','drain_life');
+  BarKeys:array[0..19] of string=('Sp','1','2','3','4','5','6','7','8','9','0','Q','Z','C','V','G','B','N','M','H');
+  BarSkills:array[0..19] of string=('attack','bash','guard','potion','firebolt','mend','frost','nova','venom','chain','barrier','meteor','blink','fire_wave','whirlwind','drain_life',
+    'blood_rage','entangle','bone_spear','sanctuary');
 { Draws on any canvas (the map control, or an off-screen bitmap for README screenshots). }
 procedure RenderMap(C:TCanvas;Width,Height:Integer;Snapshot:TJSONData;var View:TMapView);
 procedure ClearExplored(var View:TMapView);
@@ -92,7 +93,12 @@ begin
   else if Duel then C.TextOut(26,80,'Щёлкните соперника или Tab — цель. Space — удар, 4–0/Q/Z/C/V/G — умения.')
   else if JInt(W,'floor')=JInt(W,'boss_floor',3) then C.TextOut(26,80,'Здесь босс: '+JStr(W,'boss_name')+'. После победы — глубже [E] или домой [X].')
   else C.TextOut(26,80,'Босс на глубине '+JStr(W,'boss_floor')+'. Клик/Tab — цель, F — сундук, E — ниже, X — эвакуация.');
-  S:=32;if Height<560 then S:=24;Bar:=Min(34,Max(22,(Width-60) div 16-4));
+  // Floor omens and the party size sit beside the area line.
+  Log:=W.FindPath('omens');Kind:='';
+  if Log<>nil then for I:=0 to Log.Count-1 do begin if Kind<>'' then Kind:=Kind+', ';Kind:=Kind+Log.Items[I].AsString;end;
+  if Kind<>'' then begin C.Font.Color:=$006070F0;C.TextOut(Width-560,58,'Знамения: '+Kind);C.Font.Color:=$008DC5DC;end;
+  if JInt(W,'party_size',1)>1 then C.TextOut(Width-560,80,'Группа: '+JStr(W,'party_size')+' из 8');
+  S:=32;if Height<560 then S:=24;Bar:=Min(34,Max(22,(Width-60) div 20-4));
   Columns:=Min(32,(Width-40) div S);Rows:=Min(32,(Height-114-Bar-80) div S);Rows:=Max(7,Rows);
   LeftCell:=EnsureRange(JInt(W,'self.x')-Columns div 2,0,32-Columns);TopCell:=EnsureRange(JInt(W,'self.y')-Rows div 2,0,32-Rows);
   OX:=(Width-Columns*S) div 2;OY:=108;
@@ -122,6 +128,9 @@ begin
       Kind:=JStr(E,'type',JStr(E,'class_id','guardian'));PX:=OX+(X-LeftCell)*S;PY:=OY+(Y-TopCell)*S;
       // In a duel the opponent is drawn in enemy colours.
       Figure(C,PX,PY,S,Kind,(I=1) and not (Duel and (JStr(E,'id')<>View.Hero)),JStr(E,'id')=View.Hero,JInt(E,'hp'));
+      // A chimera wears a violet diamond: two species in one body.
+      if (I=0) and (JStr(E,'fused')<>'') then begin
+        C.Brush.Color:=$00C040A0;C.Pen.Color:=$00F0A0E0;C.Polygon([Point(PX+S-7,PY+1),Point(PX+S-2,PY+6),Point(PX+S-7,PY+11),Point(PX+S-12,PY+6)]);end;
       if I=0 then EnemyMarks(C,PX,PY,S,JInt(E,'hp'),JInt(E,'max_hp'),JBool(E,'elite'),JBool(E,'boss'))
       else if Duel and (JStr(E,'id')<>View.Hero) then EnemyMarks(C,PX,PY,S,JInt(E,'hp'),JInt(E,'max_hp'),False,False);
       if (View.Target<>'') and (JStr(E,'id')=View.Target) then begin
@@ -144,6 +153,6 @@ begin
   Log:=W.FindPath('log');C.Font.Name:='Tahoma';C.Font.Size:=9;C.Font.Color:=$009EAEBB;C.Brush.Style:=bsClear;
   for I:=0 to 3 do if Log.Count>I then C.TextOut(26,OY+Rows*S+8+I*16,Log.Items[Log.Count-1-I].AsString);
   C.Brush.Style:=bsSolid;
-  if not Snapshot.FindPath('lobby').AsBoolean then ActionBar(C,W,View,(Width-16*(Bar+4)) div 2,Height-Bar-8,Bar);
+  if not Snapshot.FindPath('lobby').AsBoolean then ActionBar(C,W,View,(Width-Length(BarSkills)*(Bar+4)) div 2,Height-Bar-8,Bar);
 end;
 end.

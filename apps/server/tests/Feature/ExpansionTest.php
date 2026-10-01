@@ -40,7 +40,8 @@ final class ExpansionTest extends TestCase
         (new Characters)->grant($id,'amber_amulet');
         $item=DB::table('character_items')->where('character_id',$id)->where('definition','amber_amulet')->value('id');
         $this->withToken($token)->postJson('/api/v1/characters/'.$id.'/manage',['operation_id'=>(string)Str::uuid(),'action'=>'equip','item_id'=>$item])
-            ->assertOk()->assertJsonPath('stats.max_hp',125)->assertJsonPath('stats.equipment.amulet','amber_amulet');
+            ->assertOk()->assertJsonPath('stats.max_hp',135)->assertJsonPath('stats.equipment.amulet','amber_amulet');
+        // 100 base + 10 for level 2 + 15 amulet + 10 for the default human origin.
     }
 
     public function test_bounty_counts_only_extracted_kills_and_pays_once(): void
