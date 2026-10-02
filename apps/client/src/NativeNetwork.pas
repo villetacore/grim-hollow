@@ -49,12 +49,17 @@ var SharedSession:HINTERNET=nil;SharedLock:TRTLCriticalSection;
 // One WinHTTP session for all API calls: WinHTTP keeps TCP/TLS connections alive per session,
 // so only the first request to a server pays the handshake instead of every request.
 function GetSharedSession:HINTERNET;
+var Flag:DWORD;
 begin
   EnterCriticalSection(SharedLock);
   try
     if SharedSession=nil then begin
       SharedSession:=WinHttpOpen('GrimHollow/0.5',WINHTTP_ACCESS_TYPE_NO_PROXY,nil,nil,0);Check(SharedSession<>nil);
       Check(HttpTimeouts(SharedSession,3000,3000,3000,3000));
+      // Best effort, older Windows simply refuse: gzip answers (Windows 8.1+) and HTTP/2, which
+      // carries parallel requests over one TLS connection (Windows 10).
+      Flag:=3;WinHttpSetOption(SharedSession,118,@Flag,SizeOf(Flag));
+      Flag:=1;WinHttpSetOption(SharedSession,133,@Flag,SizeOf(Flag));
     end;
     Result:=SharedSession;
   finally LeaveCriticalSection(SharedLock);end;
@@ -166,7 +171,8 @@ begin
       Check(WinHttpSendRequest(Request,nil,0,nil,0,0,0));Check(WinHttpReceiveResponse(Request,nil));
       Socket:=WsUpgrade(Request,0);Check(Socket<>nil);
       EnterCriticalSection(FLock);FSocket:=Socket;LeaveCriticalSection(FLock);
-      Payload:='{"v":1,"type":"hello","ticket":"'+FTicket+'"}';
+      // lean: the server may leave out an unchanged map and the other members' private fields.
+      Payload:='{"v":1,"type":"hello","ticket":"'+FTicket+'","caps":["lean"]}';
       Code:=WsSend(Socket,WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,Pointer(Payload),Length(Payload));
       if Code<>0 then raise Exception.Create('WebSocket hello failed '+IntToStr(Code));
       LastPing:=GetTickCount64;FMessage:='';

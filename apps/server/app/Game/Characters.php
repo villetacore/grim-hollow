@@ -46,28 +46,32 @@ final class Characters
     }
     public function sheet(int $account,string $id): array
     {
-        return DB::transaction(function() use($account,$id) {
-            $c=DB::table('characters')->where('user_id',$account)->where('id',$id)->lockForUpdate()->first();
-            abort_unless($c,404,'character_not_found'); $this->starter($c);
-            $progress=Catalog::progression((int)$c->xp);
-            $items=DB::table('character_items')->where('character_id',$id)->where('escrow',false)->orderBy('created_at')->orderBy('id')->get()->map(fn($i)=>(array)$i+self::describe($i->definition));
-            $stats=$this->profile($c);
-            // Spell costs as this hero pays them: schools of the class and the mentor are cheaper.
-            $spells=collect(Catalog::spells())->map(fn($s)=>array_replace($s,['mana'=>Catalog::spellCost($s,$stats['schools']),
-                'affinity'=>in_array($s['school'],$stats['schools'],true)]))->all();
-            return ['id'=>$id,'name'=>$c->name,'class_id'=>$c->class_id,'origin'=>$c->origin??'human','mentor'=>$c->mentor,
-                'gold'=>(int)$c->gold,'xp'=>(int)$c->xp,
-                'active_expedition'=>$c->active_expedition,'campaign'=>$c->campaign,'materials'=>$c->materials,'essence'=>(int)($c->essence??0),
-                'reagents'=>(object)self::reagents($c),'elixir'=>$c->elixir?Catalog::elixir($c->elixir):null,
-                'bounty'=>$c->bounty?json_decode($c->bounty,true):null,'best_depth'=>(int)$c->best_depth,'rating'=>(int)$c->rating,
-                'duel_wins'=>(int)$c->duel_wins,'duel_losses'=>(int)$c->duel_losses,
-                'forge_limit'=>Catalog::forgeLimit($progress['level'],(int)$c->best_depth),'supplies'=>$c->supplies,'craft_xp'=>$c->craft_xp,
-                'biomes'=>Catalog::biomes(),'classes'=>Catalog::classes(),'origins'=>Catalog::origins(),'traits'=>Catalog::traits(),
-                'schools'=>Catalog::schools(),'mentor_level'=>Catalog::MENTOR_LEVEL,'max_party'=>\GrimHollow\Core\Game::MAX_PARTY,
-                'attributes'=>['strength'=>$c->strength,'vitality'=>$c->vitality,'intellect'=>$c->intellect],
-                'points'=>max(0,($progress['level']-1)*2-$c->strength-$c->vitality-$c->intellect),
-                'stats'=>$stats,'items'=>$items,'spells'=>$spells,'enemies'=>Catalog::enemies(),'objects'=>Catalog::objects()]+$progress;
+        // Only a hero still waiting for the starter kit needs the row lock (and a commit);
+        // every later sheet is a plain read.
+        $c=DB::table('characters')->where('user_id',$account)->where('id',$id)->first();
+        abort_unless($c,404,'character_not_found');
+        if (!$c->starter_granted) DB::transaction(function() use($id) {
+            $this->starter(DB::table('characters')->where('id',$id)->lockForUpdate()->first());
         },3);
+        if (!$c->starter_granted) $c=DB::table('characters')->where('id',$id)->first();
+        $progress=Catalog::progression((int)$c->xp);
+        $items=DB::table('character_items')->where('character_id',$id)->where('escrow',false)->orderBy('created_at')->orderBy('id')->get()->map(fn($i)=>(array)$i+self::describe($i->definition));
+        $stats=$this->profile($c);
+        // Spell costs as this hero pays them: schools of the class and the mentor are cheaper.
+        $spells=collect(Catalog::spells())->map(fn($s)=>array_replace($s,['mana'=>Catalog::spellCost($s,$stats['schools']),
+            'affinity'=>in_array($s['school'],$stats['schools'],true)]))->all();
+        return ['id'=>$id,'name'=>$c->name,'class_id'=>$c->class_id,'origin'=>$c->origin??'human','mentor'=>$c->mentor,
+            'gold'=>(int)$c->gold,'xp'=>(int)$c->xp,
+            'active_expedition'=>$c->active_expedition,'campaign'=>$c->campaign,'materials'=>$c->materials,'essence'=>(int)($c->essence??0),
+            'reagents'=>(object)self::reagents($c),'elixir'=>$c->elixir?Catalog::elixir($c->elixir):null,
+            'bounty'=>$c->bounty?json_decode($c->bounty,true):null,'best_depth'=>(int)$c->best_depth,'rating'=>(int)$c->rating,
+            'duel_wins'=>(int)$c->duel_wins,'duel_losses'=>(int)$c->duel_losses,
+            'forge_limit'=>Catalog::forgeLimit($progress['level'],(int)$c->best_depth),'supplies'=>$c->supplies,'craft_xp'=>$c->craft_xp,
+            'biomes'=>Catalog::biomes(),'classes'=>Catalog::classes(),'origins'=>Catalog::origins(),'traits'=>Catalog::traits(),
+            'schools'=>Catalog::schools(),'mentor_level'=>Catalog::MENTOR_LEVEL,'max_party'=>\GrimHollow\Core\Game::MAX_PARTY,
+            'attributes'=>['strength'=>$c->strength,'vitality'=>$c->vitality,'intellect'=>$c->intellect],
+            'points'=>max(0,($progress['level']-1)*2-$c->strength-$c->vitality-$c->intellect),
+            'stats'=>$stats,'items'=>$items,'spells'=>$spells,'enemies'=>Catalog::enemies(),'objects'=>Catalog::objects()]+$progress;
     }
     public function manage(int $account,string $id,array $d): array
     {

@@ -39,6 +39,11 @@ return [
             'serialize' => false,
         ],
 
+        // Shared memory of the PHP-FPM pool: rate limits cost no SQL and no commit per request.
+        'apc' => [
+            'driver' => 'apc',
+        ],
+
         'database' => [
             'driver' => 'database',
             'connection' => env('DB_CACHE_CONNECTION'),

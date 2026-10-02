@@ -27,7 +27,8 @@ end;
 procedure TRequestThread.Execute;
 var Client: TFPHTTPClient; Output: TStringStream; Status:Integer;
 begin
-  if Copy(FUrl,1,8)='https://' then begin
+  // WinHTTP for plain HTTP too: its shared session keeps connections alive between requests.
+  if (Copy(FUrl,1,8)='https://') or (SupportsNativeNetwork and (Copy(FUrl,1,7)='http://')) then begin
     try FResponse:=NativeHttps(FUrl,FToken,FBody,FMethod,Status);
       if Status>=400 then FError:='HTTP '+IntToStr(Status)+': '+Copy(FResponse,1,220);
       if (Status>=300) and (Status<400) then FError:='Server redirects are not allowed.';

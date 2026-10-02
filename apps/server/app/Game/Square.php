@@ -15,8 +15,6 @@ final class Square
     /** Anything faster than this between two steps is a speed hack, not network jitter. */
     private const MIN_STEP_MS = 70;
     private const DIRS = ['north'=>[0,-1],'south'=>[0,1],'west'=>[-1,0],'east'=>[1,0]];
-    private const WALKER_LINES = ['guard'=>'Порядок в городе. Проходите.','dog'=>'Гав!','child'=>'Догони меня! Не догонишь!',
-        'cat'=>'Мяу.','bird'=>'Курлык.','townsfolk'=>'Хорошего дня, путник. Да хранят тебя огни.','merchant'=>'Пирожки! Горячие пирожки!'];
 
     private function hero(int $account,string $id): object
     {
@@ -68,7 +66,7 @@ final class Square
             'level'=>Catalog::progression((int)$xp)['level'],'x'=>(int)$x,'y'=>(int)$y,'facing'=>$facing,
             'emote'=>$until>$now?$emote:null,'bubble'=>isset($bubbles[$id])?mb_substr($bubbles[$id],0,60):null];
         $players=$rows->map(fn($r)=>$hero($r->id,$r->name,$r->class_id,$r->origin,$r->xp,$r->x,$r->y,$r->facing,$r->emote,$r->emote_until))->values()->all();
-        $npcs=array_map(fn($n)=>array_intersect_key($n,array_flip(['id','name','kind','service','x','y'])),Plaza::npcs());
+        $npcs=Plaza::keepers();
         $view=['v'=>1,'type'=>'plaza','now'=>(string)$now,'step_ms'=>Plaza::STEP_MS,'online'=>count($players)+1,
             'self'=>$hero($c->id,$c->name,$c->class_id,$c->origin,$c->xp,$me->x,$me->y,$me->facing,$me->emote,$me->emote_until??0),
             'players'=>$players,'npcs'=>array_merge($npcs,Plaza::walkersAt($now))];
@@ -112,14 +110,14 @@ final class Square
         foreach(Plaza::walkersAt($now) as $w){
             if($w['id']===$target){
                 abort_unless(abs($w['x']-$me->x)+abs($w['y']-$me->y)<=2,409,'too_far');
-                return ['npc'=>$w['id'],'name'=>$w['name'],'service'=>'','line'=>self::WALKER_LINES[$w['kind']]??'…'];
+                return ['npc'=>$w['id'],'name'=>$w['name'],'service'=>'','line'=>Plaza::walkerLine($w['kind'],intdiv($now,7000))];
             }
         }
         abort(404,'npc_not_found');
     }
 
     /** The training dummies tell a hero what the current gear really does. */
-    private function dummy(object $c): string
+    public function dummy(object $c): string
     {
         $p=(new Characters)->profile($c);
         $hit=13+$p['damage_bonus'];

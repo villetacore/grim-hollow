@@ -34,7 +34,8 @@ type
     FTimer: TTimer;
     FSnapshot: TJSONData;
     FToken, FHero, FExpedition: string;
-    FBusy, FSmoke: Boolean;
+    // Independent request lanes: chat and the town square never hold up game actions.
+    FBusy, FChatBusy, FPlazaBusy, FSmoke: Boolean;
     FSmokePolls: Integer;
     FPendingAction, FPendingDirection, FPendingButton: string;
     FSmokeMoveSent, FSmokeStartQueued: Boolean;
@@ -46,7 +47,10 @@ type
     FStreamSeen:Boolean;
     FReconnectAt:QWord;
     FSessionUntil:QWord;
-    FWsInFlight:Boolean;
+    // World commands sent and not yet answered; two may be on the way at once.
+    FWsInFlight:Integer;
+    // The last explored map the stream sent: lean snapshots leave an unchanged map out.
+    FStreamMap:string;
     FWsSentAt:QWord;
     // Local clock model of the server tick, and the client-side movement prediction.
     FSnapshotAt:QWord;
@@ -71,8 +75,19 @@ type
     FPlazaOutbox:TStringList;
     FPlazaInFlight:Boolean;
     FPlazaStepAt,FPlazaSentAt,FPlazaPollAt,FTalkUntil:QWord;
-    FPlazaHeld,FPlazaAsk,FTalk,FService:string;
+    FPlazaHeld,FPlazaAsk,FTalk,FTalkNpc,FTalkService:string;
     FPlazaView:TPlazaView;
+    // The live square over the world WebSocket: steps answered without HTTP round trips.
+    FPlazaWorld:TWorldConnection;
+    FPlazaLive:Boolean;
+    FPlazaPending,FPlazaSeq:Integer;
+    FPlazaReconnectAt:QWord;
+    procedure PlazaMessage(const Payload,ErrorText:string);
+    procedure ApplyPlaza(D:TJSONData);
+    procedure ShowTalk(T:TJSONData);
+    function TalkOpens(Npc:TJSONData):Boolean;
+    function PlazaSend(const ActionName,Key,Value:string):Boolean;
+    function WorldUrl:string;
     function PlazaActive:Boolean;
     procedure PlazaStep(const Direction:string);
     procedure PlazaAct(const ActionName,Target:string);
@@ -146,53 +161,161 @@ end;
 {$I GamePanels.inc}
 
 destructor TGameForm.Destroy;
-begin FWorld.Free;FSnapshot.Free; FSheet.Free; FCharacters.Free; FBagSpecs.Free; FBiomeKeys.Free;
+begin FWorld.Free;FPlazaWorld.Free;FSnapshot.Free; FSheet.Free; FCharacters.Free; FBagSpecs.Free; FBiomeKeys.Free;
   FPlazaTown.Free; FPlaza.Free; FPlazaOutbox.Free; inherited Destroy; end;
 
 { The square is live while a hero stands in town (the smoke test keeps the plain town scene). }
 function TGameForm.PlazaActive:Boolean;
 begin Result:=not FSmoke and (FToken<>'') and (FHero<>'') and (FExpedition='') and (FSheet<>nil); end;
 
+{ The world WebSocket address: /ws behind the HTTPS edge, port 8082 on a local or LAN server. }
+function TGameForm.WorldUrl:string;
+begin
+  if Copy(FServer.Text,1,8)='https://' then Result:=FServer.Text+'/ws'
+  else Result:='http://'+ParseURI(FServer.Text).Host+':8082';
+end;
+
 procedure TGameForm.ResetPlaza;
 begin
   FreeAndNil(FPlaza);FPlazaX:=-1;FPlazaY:=-1;FPlazaOutbox.Clear;FPlazaInFlight:=False;
-  FPlazaHeld:='';FPlazaAsk:='';FTalk:='';FService:='';
+  FPlazaHeld:='';FPlazaAsk:='';FTalk:='';FTalkNpc:='';FTalkService:='';
+  // Stop, not free: this may run inside the stream's own callback. Poll frees it once finished.
+  if FPlazaWorld<>nil then FPlazaWorld.Stop;
+  FPlazaLive:=False;FPlazaPending:=0;
 end;
 
-{ Moves the own hero at once and queues the step for the server, which confirms or snaps back. }
+{ What a keeper's service is called in the dialog hint; empty when talking opens nothing. }
+function ServiceTitle(const Service:string):string;
+begin
+  case Service of
+    'forge':Result:='кузница и аптекарь';'market':Result:='торговая доска';'guild':Result:='гильдия и друзья';
+    'bounty':Result:='доска контрактов';'temple':Result:='таланты и сброс';'alchemy':Result:='алхимия';
+    'mentor':Result:='выбор наставника';'gate':Result:='собрать поход';'arena':Result:='дуэль на арене';'library':Result:='справочник';
+  else Result:='';end;
+end;
+
+{ A keeper's answer stays on screen; F (or a click) on the same keeper then opens its service. }
+procedure TGameForm.ShowTalk(T:TJSONData);
+begin
+  FTalkNpc:=JStr(T,'npc');FTalkService:=JStr(T,'service');FTalkUntil:=GetTickCount64+15000;
+  FTalk:=JStr(T,'name')+': '+JStr(T,'line');
+  if ServiceTitle(FTalkService)<>'' then FTalk:=FTalk+#10+'[F] или щелчок по жителю — '+ServiceTitle(FTalkService)+'.   [Esc] — закрыть.'
+  else FTalk:=FTalk+#10+'[F] — спросить ещё.   [Esc] — закрыть.';
+  FMap.Invalidate;
+end;
+
+{ The second F on a keeper who has just spoken opens what the keeper offers. }
+function TGameForm.TalkOpens(Npc:TJSONData):Boolean;
+var Service:string;
+begin
+  Result:=(Npc<>nil) and (FTalk<>'') and (FTalkNpc=JStr(Npc,'id')) and (ServiceTitle(FTalkService)<>'') and (GetTickCount64<FTalkUntil);
+  if not Result then Exit;
+  Service:=FTalkService;FTalk:='';FTalkNpc:='';FTalkService:='';FMap.Invalidate;
+  OpenService(Service);
+end;
+
+{ One message on the live square; False when the stream is not up (HTTP takes over). }
+function TGameForm.PlazaSend(const ActionName,Key,Value:string):Boolean;
+var D:TJSONObject;
+begin
+  Result:=False;
+  if not FPlazaLive or (FPlazaWorld=nil) or FPlazaWorld.Finished then Exit;
+  Inc(FPlazaSeq);
+  D:=TJSONObject.Create(['v',1,'type','plaza','action',ActionName,Key,Value,'seq',FPlazaSeq]);
+  try Result:=FPlazaWorld.SendText(D.AsJSON);finally D.Free;end;
+  if not Result then FPlazaLive:=False;
+end;
+
+{ Moves the own hero at once and sends the step; the server confirms or snaps back. }
 procedure TGameForm.PlazaStep(const Direction:string);
-var NX,NY:Integer;
+var NX,NY:Integer;Npc:TJSONData;
 begin
   if (FPlazaTown=nil) or (FPlaza=nil) or (FPlazaX<0) then Exit;
   if GetTickCount64-FPlazaStepAt<120 then begin FPlazaHeld:=Direction;Exit;end;
   FPlazaHeld:='';NX:=FPlazaX;NY:=FPlazaY;
   case Direction of 'north':Dec(NY);'south':Inc(NY);'west':Dec(NX);'east':Inc(NX);else Exit;end;
   if not PlazaWalkable(FPlazaTown,FPlaza,NX,NY) then Exit;
+  // Over the stream every step leaves at once; only a runaway backlog waits.
+  if FPlazaLive and (FPlazaPending>=8) then begin FPlazaHeld:=Direction;Exit;end;
   FPlazaX:=NX;FPlazaY:=NY;FPlazaStepAt:=GetTickCount64;
-  if FPlazaOutbox.Count<6 then FPlazaOutbox.Add(Direction);
-  FlushPlaza;FMap.Invalidate;
+  if PlazaSend('move','direction',Direction) then Inc(FPlazaPending)
+  else begin if FPlazaOutbox.Count<6 then FPlazaOutbox.Add(Direction);FlushPlaza;end;
+  // Walking away ends the conversation.
+  if FTalkNpc<>'' then begin Npc:=NearestNpc(FPlaza,FPlazaX,FPlazaY,3);
+    if (Npc=nil) or (JStr(Npc,'id')<>FTalkNpc) then begin FTalk:='';FTalkNpc:='';FTalkService:='';end;end;
+  FMap.Invalidate;
 end;
 
-{ Sends the oldest queued step, never two closer than the server's pace allows. }
+{ HTTP fallback: sends the oldest queued step, never two closer than the server's pace allows. }
 procedure TGameForm.FlushPlaza;
 var D:TJSONObject;Direction:string;
 begin
-  if FBusy or FPlazaInFlight or (FPlazaOutbox.Count=0) or (GetTickCount64-FPlazaSentAt<90) then Exit;
+  if FPlazaBusy or FPlazaInFlight or (FPlazaOutbox.Count=0) or (GetTickCount64-FPlazaSentAt<90) then Exit;
   Direction:=FPlazaOutbox[0];FPlazaOutbox.Delete(0);
   FPlazaInFlight:=True;FPlazaSentAt:=GetTickCount64;
   D:=TJSONObject.Create(['action','move','direction',Direction]);
   try Send('POST','characters/'+FHero+'/plaza',D.AsJSON,'plaza_move');finally D.Free;end;
-  if not FBusy then FPlazaInFlight:=False;
+  if not FPlazaBusy then FPlazaInFlight:=False;
 end;
 
-{ Talking and emotes: one request; while another is in flight it waits in FPlazaAsk. }
+{ Talking and emotes. Over HTTP a talk waits for the queued steps, so that the server judges
+  the distance from the same cell the player sees. }
 procedure TGameForm.PlazaAct(const ActionName,Target:string);
 var D:TJSONObject;
 begin
-  if FBusy then begin FPlazaAsk:=ActionName+'|'+Target;Exit;end;
+  if PlazaSend(ActionName,'target',Target) then begin FPlazaAsk:='';Exit;end;
+  if FPlazaBusy or FPlazaInFlight or (FPlazaOutbox.Count>0) then begin FPlazaAsk:=ActionName+'|'+Target;Exit;end;
   FPlazaAsk:='';
   D:=TJSONObject.Create(['action',ActionName,'target',Target]);
   try Send('POST','characters/'+FHero+'/plaza',D.AsJSON,'plaza_'+ActionName);finally D.Free;end;
+end;
+
+{ A view of the square, from HTTP or the stream: the own cell follows the server only when no
+  step of ours is still on the way. Takes ownership of D. }
+procedure TGameForm.ApplyPlaza(D:TJSONData);
+var Npcs,Keepers,Walkers:TJSONData;List:TJSONArray;I:Integer;
+begin
+  if D.FindPath('map')<>nil then begin FPlazaTown.Free;FPlazaTown:=D.Clone;end;
+  // Live views carry only the walkers; the keepers come from the full view.
+  Walkers:=D.FindPath('walkers');Npcs:=D.FindPath('npcs');
+  if (Npcs=nil) and (Walkers<>nil) and (FPlazaTown<>nil) then begin
+    List:=TJSONArray.Create;Keepers:=FPlazaTown.FindPath('npcs');
+    if Keepers<>nil then for I:=0 to Keepers.Count-1 do if JStr(Keepers.Items[I],'service')<>'' then List.Add(Keepers.Items[I].Clone);
+    for I:=0 to Walkers.Count-1 do List.Add(Walkers.Items[I].Clone);
+    TJSONObject(D).Add('npcs',List);
+  end;
+  if (FPlazaX<0) or ((FPlazaOutbox.Count=0) and not FPlazaInFlight and (FPlazaPending=0) and (GetTickCount64-FPlazaStepAt>400)) then begin
+    FPlazaX:=JInt(D,'self.x');FPlazaY:=JInt(D,'self.y');end;
+  FPlaza.Free;FPlaza:=D;FPlazaPollAt:=GetTickCount64;
+  FMap.Invalidate;
+end;
+
+procedure TGameForm.PlazaMessage(const Payload,ErrorText:string);
+var D:TJSONData;Kind:string;
+begin
+  if ErrorText<>'' then begin FPlazaLive:=False;FPlazaPending:=0;FPlazaReconnectAt:=GetTickCount64+3000;Exit;end;
+  if not PlazaActive then Exit;
+  D:=GetJSON(Payload);
+  try
+    Kind:=JStr(D,'type');
+    if Kind='plaza' then begin
+      FPlazaLive:=FPlazaLive or (D.FindPath('map')<>nil);
+      ApplyPlaza(D);D:=nil;
+    end else if Kind='plaza_result' then begin
+      if JStr(D,'action')='move' then begin
+        if FPlazaPending>0 then Dec(FPlazaPending);
+        // A refused step, or a settled path that ended elsewhere, snaps to the server's cell.
+        if (JStr(D,'result')<>'ok') or ((FPlazaPending=0) and ((JInt(D,'x')<>FPlazaX) or (JInt(D,'y')<>FPlazaY))) then begin
+          FPlazaX:=JInt(D,'x');FPlazaY:=JInt(D,'y');FMap.Invalidate;end;
+      end else if JStr(D,'action')='talk' then begin
+        if D.FindPath('talk')<>nil then ShowTalk(D.FindPath('talk'))
+        else if JStr(D,'result')='too_far' then FStatus.Caption:='Подойдите ближе, чтобы поговорить.'
+        else FStatus.Caption:=FriendlyError(JStr(D,'result'));
+      end;
+    end else if (Kind='error') and (JStr(D,'code')='in_expedition') then begin
+      ResetPlaza;RefreshSheet;
+    end;
+  finally D.Free;end;
 end;
 
 procedure TGameForm.OpenTown(Tab:Integer);
@@ -364,15 +487,20 @@ begin
 end;
 
 procedure TGameForm.WorldMessage(const Payload,ErrorText:string);
-var D:TJSONData;Fresh,Kind:string;Rejected:Boolean;
+var D,W:TJSONData;Fresh,Kind:string;Rejected:Boolean;
 begin
-  if ErrorText<>'' then begin FReconnectAt:=GetTickCount64+3000;FWsInFlight:=False;Exit;end;
+  if ErrorText<>'' then begin FReconnectAt:=GetTickCount64+3000;FWsInFlight:=0;FStreamMap:='';Exit;end;
   D:=nil;Rejected:=False;
   try D:=GetJSON(Payload);Kind:=JStr(D,'type');
     if (Kind='snapshot') and (JStr(D,'instance_id')=FExpedition) then begin
-      FStreamSnapshot:=Payload;FStreamSeen:=True;
-    end else if (Kind='command_result') and FWsInFlight then begin
-      FWsInFlight:=False;
+      // Lean snapshots leave out an explored map that has not changed since the last one.
+      W:=D.FindPath('world');
+      if (W<>nil) and (W.FindPath('map')<>nil) then begin FStreamMap:=W.FindPath('map').AsJSON;FStreamSnapshot:=Payload;end
+      else if (W<>nil) and (FStreamMap<>'') then begin TJSONObject(W).Add('map',GetJSON(FStreamMap));FStreamSnapshot:=D.AsJSON;end
+      else FStreamSnapshot:='';
+      FStreamSeen:=FStreamSeen or (FStreamSnapshot<>'');
+    end else if (Kind='command_result') and (FWsInFlight>0) then begin
+      Dec(FWsInFlight);
       if JStr(D,'status')='rejected' then begin
         Rejected:=True;FPathCount:=0;FLocalReady:=0;
         // An early arrival is not an error: silently retry once the hero is ready.
@@ -381,8 +509,8 @@ begin
           if FPendingAction='' then begin FPendingAction:=FLastAction;FPendingDirection:=FLastDirection;end;
         end else FStatus.Caption:=FriendlyError(JStr(D,'reason'));
       end else FAwaitingStream:=GetTickCount64;
-    end else if (Kind='error') and FWsInFlight then begin
-      FWsInFlight:=False;FPendingAction:='';FStatus.Caption:='Сервер отклонил действие.';
+    end else if (Kind='error') and (FWsInFlight>0) then begin
+      Dec(FWsInFlight);FPendingAction:='';FStatus.Caption:='Сервер отклонил действие.';
     end else if Kind='server_paused' then
       FStatus.Caption:='Мир на сервере временно приостановлен. Подождите…';
   finally D.Free;end;
@@ -488,8 +616,8 @@ begin
     CX:=FPlazaView.LeftCell+(X-FPlazaView.OX) div FPlazaView.S;CY:=FPlazaView.TopCell+(Y-FPlazaView.OY) div FPlazaView.S;
     E:=NearestNpc(FPlaza,CX,CY,0);
     if E<>nil then begin
-      if Abs(JInt(E,'x')-FPlazaX)+Abs(JInt(E,'y')-FPlazaY)<=2 then PlazaAct('talk',JStr(E,'id'))
-      else FStatus.Caption:=JStr(E,'name')+': подойдите ближе, чтобы поговорить.';
+      if Abs(JInt(E,'x')-FPlazaX)+Abs(JInt(E,'y')-FPlazaY)>2 then FStatus.Caption:=JStr(E,'name')+': подойдите ближе, чтобы поговорить.'
+      else if not TalkOpens(E) then PlazaAct('talk',JStr(E,'id'));
     end;
     Exit;
   end;
@@ -520,7 +648,7 @@ end;
 procedure TGameForm.DispatchPending;
 var ButtonName, ActionName, Direction: string; W: TJSONData;
 begin
-  if FBusy or FWsInFlight then Exit;
+  if FBusy or (FWsInFlight>=2) then Exit;
   if FPendingButton<>'' then begin
     ButtonName:=FPendingButton; FPendingButton:='';
     ButtonClick(FindComponent(ButtonName)); Exit;
@@ -534,12 +662,13 @@ begin
 end;
 
 procedure TGameForm.Closing(Sender: TObject; var CanClose: Boolean);
-begin CanClose:=not FBusy; if FBusy then FStatus.Caption:='Завершается сетевой запрос. Повторите закрытие через несколько секунд.'; end;
+begin CanClose:=not (FBusy or FChatBusy or FPlazaBusy); if not CanClose then FStatus.Caption:='Завершается сетевой запрос. Повторите закрытие через несколько секунд.'; end;
 
 procedure TGameForm.Send(const Method, Path, Body, Kind: string);
 var Base: string;
 begin
-  if FBusy then Exit;
+  if ((Copy(Kind,1,4)='chat') and FChatBusy) or ((Copy(Kind,1,5)='plaza') and FPlazaBusy) or
+    ((Copy(Kind,1,4)<>'chat') and (Copy(Kind,1,5)<>'plaza') and FBusy) then Exit;
   Base:=Trim(FServer.Text);
   // This prototype intentionally permits plain HTTP only on loopback.
   if not (SupportsNativeNetwork and (Copy(Base,1,8)='https://')) and
@@ -547,8 +676,11 @@ begin
     not (FSmoke and (Base='http://api:8000')) then begin
     FStatus.Caption:='Используйте локальный сервер :8080, сервер в домашней сети (http://192.168.x.x:8080) или HTTPS-сервер.'; Exit;
   end;
-  FBusy:=True; TRequestThread.Create(@Received,Base+'/api/v1/'+Path,FToken,Body,Method,Kind);
-  FHeroes.Enabled:=False;
+  // Chat and the town square run on their own lanes, so they never delay game actions.
+  if Copy(Kind,1,4)='chat' then FChatBusy:=True
+  else if Copy(Kind,1,5)='plaza' then FPlazaBusy:=True
+  else begin FBusy:=True;FHeroes.Enabled:=False;end;
+  TRequestThread.Create(@Received,Base+'/api/v1/'+Path,FToken,Body,Method,Kind);
 end;
 
 procedure TGameForm.ButtonClick(Sender: TObject);
@@ -646,14 +778,17 @@ begin
 end;
 
 procedure TGameForm.Received(const Kind, Response, Error: string);
-var D, Items, W: TJSONData; I, Selected:Integer; SocketUrl, Fresh:string;
+var D, Items, W: TJSONData; I, Selected:Integer; Fresh:string;
 begin
-  FBusy:=False;
+  if Copy(Kind,1,4)='chat' then FChatBusy:=False
+  else if Copy(Kind,1,5)='plaza' then FPlazaBusy:=False
+  else begin FBusy:=False;FHeroes.Enabled:=FExpedition='';end;
   if Kind='poll' then FAwaitingStream:=0;
-  FHeroes.Enabled:=FExpedition='';
   if (Error<>'') and (Copy(Kind,1,5)='plaza') and (Pos('HTTP 401',Error)=0) then begin
     FPlazaInFlight:=False;
     if Kind='plaza_talk' then FStatus.Caption:=FriendlyError(Error);
+    // An older server or a hero on the way out: the HTTP square stays, the stream is retried later.
+    if Kind='plaza_ticket' then FPlazaReconnectAt:=GetTickCount64+30000;
     if Kind='plaza_move' then begin FPlazaOutbox.Clear;if FPlaza<>nil then begin FPlazaX:=JInt(FPlaza,'self.x');FPlazaY:=JInt(FPlaza,'self.y');end;end;
     if Pos('in_expedition',Error)>0 then begin ResetPlaza;RefreshSheet;end;
     Exit;
@@ -684,27 +819,25 @@ begin
   D:=nil;
   try
     D:=GetJSON(Response);
-    if Copy(Kind,1,5)='plaza' then begin
+    if Kind='plaza_ticket' then begin
+      if PlazaActive and (FPlazaWorld=nil) then begin
+        FPlazaLive:=False;FPlazaPending:=0;FPlazaWorld:=TWorldConnection.Create(WorldUrl,JStr(D,'ticket'),@PlazaMessage);end;
+    end else if Copy(Kind,1,5)='plaza' then begin
       if Kind='plaza_move' then FPlazaInFlight:=False;
-      if (Kind='plaza_full') or (FPlazaTown=nil) then begin
-        if D.FindPath('map')<>nil then begin FPlazaTown.Free;FPlazaTown:=D.Clone;end;
-      end;
       if (Kind='plaza_move') and (JStr(D,'result')<>'ok') then begin
         // The server refused the step: snap to its position and forget the queued ones.
-        FPlazaOutbox.Clear;FPlazaX:=-1;
+        FPlazaOutbox.Clear;if not FPlazaLive then FPlazaX:=-1;
       end;
-      if (FPlazaX<0) or ((FPlazaOutbox.Count=0) and not FPlazaInFlight and (GetTickCount64-FPlazaStepAt>400)) then begin
-        FPlazaX:=JInt(D,'self.x');FPlazaY:=JInt(D,'self.y');end;
-      if D.FindPath('talk')<>nil then begin
-        FTalk:=JStr(D,'talk.name')+': '+JStr(D,'talk.line');FTalkUntil:=GetTickCount64+10000;FService:=JStr(D,'talk.service');
-      end;
-      FPlaza.Free;FPlaza:=D;D:=nil;FPlazaPollAt:=GetTickCount64;
-      FMap.Invalidate;
+      if D.FindPath('talk')<>nil then ShowTalk(D.FindPath('talk'));
+      // Once the stream is live, a late HTTP answer must not roll the square back.
+      if not FPlazaLive or (FPlazaTown=nil) then begin ApplyPlaza(D);D:=nil;end;
     end else if Kind='mentor' then begin
       FStatus.Caption:='Наставник выбран: его черты и школы магии теперь ваши.';RefreshSheet;
     end else if Kind='refresh' then begin
       FToken:=JStr(D,'access_token');FSessionUntil:=GetTickCount64+QWord(JInt(D,'expires_in',28800))*1000;
-      FreeAndNil(FWorld);FStreamSeen:=False;FStreamSnapshot:='';FWsInFlight:=False;
+      FreeAndNil(FWorld);FStreamSeen:=False;FStreamSnapshot:='';FWsInFlight:=0;
+      // Streams are bound to the old session: reopen the square with a fresh ticket.
+      if FPlazaWorld<>nil then FPlazaWorld.Stop;FPlazaLive:=False;FPlazaPending:=0;
     end else if Kind='auth' then begin
       FPendingAction:=''; FPendingButton:='';
       FToken:=D.FindPath('access_token').AsString; FPassword.Clear;
@@ -769,9 +902,8 @@ begin
       end;
     end else if Kind='ticket' then begin
       if FExpedition<>'' then begin
-        if Copy(FServer.Text,1,8)='https://' then SocketUrl:=FServer.Text+'/ws'
-        else SocketUrl:='http://'+ParseURI(FServer.Text).Host+':8082';
-        FreeAndNil(FWorld);FStreamSeen:=False;FWorld:=TWorldConnection.Create(SocketUrl,JStr(D,'ticket'),@WorldMessage);
+        FreeAndNil(FWorld);FStreamSeen:=False;FStreamMap:='';FWsInFlight:=0;
+        FWorld:=TWorldConnection.Create(WorldUrl,JStr(D,'ticket'),@WorldMessage);
       end;
     end else if Kind='expedition' then begin
       FExpedition:=D.FindPath('id').AsString; FCode.Text:=D.FindPath('join_code').AsString;ResetPlaza;
@@ -864,21 +996,43 @@ end;
 procedure TGameForm.Poll(Sender: TObject);
 var D:TJSONObject;Payload:string;
 begin
+  Inc(FPollCounter);
+  // The town square and chat run on their own lanes, even while a game request is out.
+  if (FPlazaWorld<>nil) and (FPlazaWorld.Finished or not PlazaActive) then begin
+    FreeAndNil(FPlazaWorld);FPlazaLive:=False;FPlazaPending:=0;
+  end;
+  if PlazaActive then begin
+    if (FPlazaHeld<>'') and (GetTickCount64-FPlazaStepAt>=120) then PlazaStep(FPlazaHeld);
+    if (FTalk<>'') and (GetTickCount64>FTalkUntil) then begin FTalk:='';FTalkNpc:='';FTalkService:='';FMap.Invalidate;end;
+    if SupportsWorldStream and (FPlazaWorld=nil) and (GetTickCount64>=FPlazaReconnectAt) and not FPlazaBusy then begin
+      FPlazaReconnectAt:=GetTickCount64+3000;D:=TJSONObject.Create(['character_id',FHero]);
+      try Send('POST','world/tickets',D.AsJSON,'plaza_ticket');finally D.Free;end;
+    end;
+    if FPlazaAsk<>'' then begin Payload:=FPlazaAsk;PlazaAct(Copy(Payload,1,Pos('|',Payload)-1),Copy(Payload,Pos('|',Payload)+1,40));end;
+    // Without the stream the square is polled over HTTP, a few times a second.
+    if not FPlazaLive then begin
+      FlushPlaza;
+      if not FPlazaBusy and (FPlazaTown=nil) then Send('GET','characters/'+FHero+'/plaza?full=1','','plaza_full')
+      else if not FPlazaBusy and (FPlazaOutbox.Count=0) and not FPlazaInFlight and (GetTickCount64-FPlazaPollAt>=300) then begin
+        FPlazaPollAt:=GetTickCount64;Send('GET','characters/'+FHero+'/plaza','','plaza');end;
+    end;
+  end;
+  if not FSmoke and (FHero<>'') and (FPollCounter mod 20=0) then ReadChat;
   if FBusy then Exit;
-  // A WebSocket command whose result never arrived must not block input: drop the flag and
+  // A WebSocket command whose result never arrived must not block input: drop the count and
   // let the HTTP fallback below refresh the state.
-  if FWsInFlight and (GetTickCount64-FWsSentAt>3000) then begin
-    FWsInFlight:=False;FAwaitingStream:=GetTickCount64-2000;
+  if (FWsInFlight>0) and (GetTickCount64-FWsSentAt>3000) then begin
+    FWsInFlight:=0;FAwaitingStream:=GetTickCount64-2000;
   end;
   // Held keys are dispatched from the local tick estimate, not only when a snapshot arrives.
-  if (FPendingAction<>'') and not FWsInFlight then begin DispatchPending;if FBusy then Exit;end;
+  if (FPendingAction<>'') and (FWsInFlight<2) then begin DispatchPending;if FBusy then Exit;end;
   if (FPathCount>0) and (GetTickCount64>FPredUntil) then FPathCount:=0;
   if (FExpedition<>'') and (FSnapshot<>nil) then FMap.Invalidate;
   if (FToken<>'') and (FSessionUntil>0) and (GetTickCount64+60000>=FSessionUntil) then begin
     Send('POST','auth/refresh','{}','refresh');Exit;
   end;
   if (FWorld<>nil) and ((FExpedition='') or FWorld.Finished) then begin
-    FreeAndNil(FWorld);FStreamSnapshot:='';FStreamSeen:=False;FWsInFlight:=False;
+    FreeAndNil(FWorld);FStreamSnapshot:='';FStreamSeen:=False;FWsInFlight:=0;FStreamMap:='';
   end;
   if SupportsWorldStream and (FExpedition<>'') and (FWorld=nil) and (GetTickCount64>=FReconnectAt) then begin
     D:=TJSONObject.Create(['character_id',FHero,'expedition_id',FExpedition]);
@@ -888,18 +1042,6 @@ begin
     Payload:=FStreamSnapshot;FStreamSnapshot:='';Received('poll',Payload,'');
     if FBusy then Exit;
   end;
-  if PlazaActive then begin
-    if FService<>'' then begin Payload:=FService;FService:='';OpenService(Payload);Exit;end;
-    if (FPlazaHeld<>'') and (GetTickCount64-FPlazaStepAt>=120) then PlazaStep(FPlazaHeld);
-    FlushPlaza;if FBusy then Exit;
-    if FPlazaAsk<>'' then begin Payload:=FPlazaAsk;PlazaAct(Copy(Payload,1,Pos('|',Payload)-1),Copy(Payload,Pos('|',Payload)+1,40));if FBusy then Exit;end;
-    if (FTalk<>'') and (GetTickCount64>FTalkUntil) then begin FTalk:='';FMap.Invalidate;end;
-    if FPlazaTown=nil then begin Send('GET','characters/'+FHero+'/plaza?full=1','','plaza_full');Exit;end;
-    if (FPlazaOutbox.Count=0) and not FPlazaInFlight and (GetTickCount64-FPlazaPollAt>=300) then begin
-      FPlazaPollAt:=GetTickCount64;Send('GET','characters/'+FHero+'/plaza','','plaza');Exit;end;
-  end;
-  Inc(FPollCounter);
-  if not FSmoke and (FHero<>'') and (FPollCounter mod 20=0) then begin ReadChat;if FBusy then Exit;end;
   if FSmoke and (FToken='') then ButtonClick(FindComponent('RegisterButton'))
   else if FExpedition<>'' then begin
     if not FSmoke and FStreamSeen and (FWorld<>nil) and not FWorld.Finished and
@@ -929,7 +1071,8 @@ begin
   end;
   if ActionName='move' then FFacing:=Direction;
   W:=FSnapshot.FindPath('world');
-  if FBusy or FWsInFlight or not CanAct then begin
+  // Up to two commands may be on the way: the server buffers one that arrives early.
+  if FBusy or (FWsInFlight>=2) or not CanAct then begin
     FPendingAction:=ActionName; FPendingDirection:=Direction; Exit;
   end;
   P:=TJSONObject.Create(['action',ActionName]);
@@ -975,7 +1118,7 @@ begin
   if StreamLive then begin
     D:=TJSONObject.Create(['v',1,'type','command','command_id',CommandId]); D.Add('payload',P.Clone);
     try Sent:=FWorld.SendText(D.AsJSON); finally D.Free; end;
-    if Sent then begin P.Free; FWsInFlight:=True; FWsSentAt:=GetTickCount64; Exit; end;
+    if Sent then begin P.Free; Inc(FWsInFlight); FWsSentAt:=GetTickCount64; Exit; end;
   end;
   D:=TJSONObject.Create(['character_id',FHero,'command_id',CommandId]); D.Add('payload',P);
   try Send('POST','expeditions/'+FExpedition+'/commands',D.AsJSON,'command'); finally D.Free; end;
@@ -985,16 +1128,19 @@ procedure TGameForm.KeyInput(Sender: TObject; var Key: Word; Shift: TShiftState)
 begin
   if FSmoke then Inc(FSmokeKeys);
   if Key=VK_F1 then begin ShowFieldGuide(Self);Key:=0;Exit;end;
-  if Key=VK_ESCAPE then begin FocusGame;Key:=0;Exit;end;
+  if Key=VK_ESCAPE then begin
+    if PlazaActive and (FTalk<>'') then begin FTalk:='';FTalkNpc:='';FTalkService:='';FMap.Invalidate;end;
+    FocusGame;Key:=0;Exit;end;
   if (ActiveControl is TEdit) and (ActiveControl<>FCode) then Exit;
   if (ActiveControl is TComboBox) or (ActiveControl is TMemo) or (ActiveControl is TListBox) then Exit;
   if (ActiveControl=FCode) and not FCode.ReadOnly then Exit;
   if PlazaActive then begin
     case Key of
       VK_W,VK_UP:PlazaStep('north');VK_S,VK_DOWN:PlazaStep('south');VK_A,VK_LEFT:PlazaStep('west');VK_D,VK_RIGHT:PlazaStep('east');
-      VK_F,VK_SPACE,VK_E:begin
-        if NearestNpc(FPlaza,FPlazaX,FPlazaY,2)<>nil then PlazaAct('talk',JStr(NearestNpc(FPlaza,FPlazaX,FPlazaY,2),'id'))
-        else FStatus.Caption:='Рядом никого нет. Подойдите к жителю города.';end;
+      VK_F,VK_SPACE,VK_E,VK_RETURN:begin
+        // The first F talks; the second, while the keeper's words are shown, opens the service.
+        if NearestNpc(FPlaza,FPlazaX,FPlazaY,2)=nil then FStatus.Caption:='Рядом никого нет. Подойдите к жителю города.'
+        else if not TalkOpens(NearestNpc(FPlaza,FPlazaX,FPlazaY,2)) then PlazaAct('talk',JStr(NearestNpc(FPlaza,FPlazaX,FPlazaY,2),'id'));end;
       VK_1:PlazaAct('emote','wave');VK_2:PlazaAct('emote','bow');VK_3:PlazaAct('emote','cheer');VK_4:PlazaAct('emote','dance');VK_5:PlazaAct('emote','sit');
       VK_T:ButtonClick(FindComponent('TownButton'));
     else Exit;end;

@@ -121,12 +121,17 @@ final class GameController
 
     public function ticket(Request $r, World $world)
     {
-        $d = $r->validate(['character_id' => 'required|ulid', 'expedition_id' => 'required|ulid']);
+        // Without an expedition the ticket opens the live town square on the same socket.
+        $d = $r->validate(['character_id' => 'required|ulid', 'expedition_id' => 'nullable|ulid']);
         $c = $world->character($r->attributes->get('account_id'), $d['character_id']);
-        $world->snapshot($d['expedition_id'], $c->id);
+        if (empty($d['expedition_id'])) {
+            abort_if($c->active_expedition, 409, 'in_expedition');
+        } else {
+            $world->snapshot($d['expedition_id'], $c->id);
+        }
         $token = bin2hex(random_bytes(32));
         DB::table('world_tickets')->insert(['hash' => hash('sha256', $token), 'character_id' => $c->id,
-            'expedition_id' => $d['expedition_id'], 'session_hash'=>hash('sha256',$r->bearerToken()),'expires_at' => now()->addSeconds(30)]);
+            'expedition_id' => $d['expedition_id'] ?? null, 'session_hash'=>hash('sha256',$r->bearerToken()),'expires_at' => now()->addSeconds(30)]);
 
         return ['ticket' => $token, 'expires_in' => 30];
     }

@@ -141,4 +141,4 @@ $view = ['v' => 1, 'type' => 'plaza', 'now' => (string) $now, 'online' => 6, 'se
     'players' => $players, 'npcs' => array_merge($npcs, Plaza::walkersAt($now))];
 file_put_contents("$out/plaza.json", json_encode(['town' => ['width' => Plaza::WIDTH, 'height' => Plaza::HEIGHT, 'map' => Plaza::map(),
     'buildings' => Plaza::buildings()], 'plaza' => $view, 'hero' => 'me',
-    'talk' => 'Наставница Кайра: Страж с наставником-убийцей? Почему бы и нет. Восемь классов — шестьдесят четыре пути.'], JSON_UNESCAPED_UNICODE));
+    'talk' => 'Наставница Кайра: Страж с наставником-убийцей? Почему бы и нет. Восемь классов — шестьдесят четыре пути.'."\n".'[F] или щелчок по жителю — выбор наставника.   [Esc] — закрыть.'], JSON_UNESCAPED_UNICODE));

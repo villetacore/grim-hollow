@@ -14,7 +14,8 @@ x-app: &app
     DB_DATABASE: grim_hollow
     DB_USERNAME: grim
     DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD}
-    CACHE_STORE: database
+    # APCu: rate limits and cache live in the PHP pool memory instead of MySQL transactions.
+    CACHE_STORE: apc
     SESSION_DRIVER: array
     LOG_CHANNEL: stderr
   init: true
@@ -32,6 +33,10 @@ services:
     command:
       - --innodb-flush-log-at-trx-commit=${MYSQL_FLUSH_LOG_AT_TRX_COMMIT:-1}
       - --sync-binlog=${MYSQL_SYNC_BINLOG:-1}
+      # Game state is small and hot: keep it in memory, skip DNS lookups on every connection.
+      - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL:-512M}
+      - --innodb-log-buffer-size=32M
+      - --skip-name-resolve
     volumes: [mysql-data:/var/lib/mysql]
     restart: unless-stopped
     healthcheck:

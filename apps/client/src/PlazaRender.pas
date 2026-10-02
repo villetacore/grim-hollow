@@ -262,10 +262,20 @@ begin
   if Near<>nil then C.TextOut(26,Y,'Рядом: '+JStr(Near,'name')+'. Нажмите F, чтобы поговорить.')
   else C.TextOut(26,Y,'Подойдите к жителю и нажмите F. Над героями видны сообщения общего чата.');
   C.Brush.Style:=bsSolid;
+  // The conversation: a box over the lower part of the square, sized to the whole answer.
+  // Talk is "Name: words", optionally followed by a line feed and a hint.
   if Talk<>'' then begin
-    Y:=Y+22;Fill(C,20,Y,Width-40,Height-Y-8,$00202830);Frame(C,Rect(20,Y,Width-20,Height-8));
-    C.Font.Size:=10;C.Brush.Style:=bsClear;C.Font.Color:=$00A0E0F0;Rest:=Talk;
-    for I:=0 to 2 do if (Rest<>'') and (Y+8+I*18<Height-24) then C.TextOut(32,Y+8+I*18,TakeLine(C,Rest,Width-70));
+    Text:=Talk;Emote:='';J:=Pos(#10,Text);
+    if J>0 then begin Emote:=Copy(Text,J+1,MaxInt);Text:=Copy(Text,1,J-1);end;
+    C.Font.Size:=10;K:=Min(Columns*S-24,720);
+    // Count the wrapped lines first, then draw.
+    Rest:=Text;J:=0;while (Rest<>'') and (J<8) do begin TakeLine(C,Rest,K-24);Inc(J);end;
+    TW:=K;TH:=16+J*19+IfThen(Emote<>'',24,0);
+    MX:=OX+(Columns*S-TW) div 2;MY:=OY+Rows*S-TH-10;
+    Fill(C,MX,MY,TW,TH,$00182028);Frame(C,Rect(MX,MY,MX+TW,MY+TH));
+    C.Brush.Style:=bsClear;C.Font.Color:=$00A0E0F0;Rest:=Text;
+    for I:=0 to J-1 do C.TextOut(MX+12,MY+8+I*19,TakeLine(C,Rest,K-24));
+    if Emote<>'' then begin C.Font.Size:=9;C.Font.Color:=$0080C890;C.TextOut(MX+12,MY+TH-24,Emote);end;
     C.Brush.Style:=bsSolid;
   end;
 end;

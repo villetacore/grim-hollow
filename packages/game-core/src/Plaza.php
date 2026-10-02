@@ -193,9 +193,10 @@ final class Plaza
     /** Where every walker is at this moment (milliseconds since the epoch). */
     public static function walkersAt(int $ms): array
     {
+        static $routes = [];
         $list = [];
         foreach (self::walkers() as $w) {
-            $cells = self::routeCells($w['route']);
+            $cells = $routes[$w['id']] ??= self::routeCells($w['route']);
             $n = count($cells);
             $step = intdiv($ms, $w['ms']) + $w['offset'];
             $here = $cells[(($step % $n) + $n) % $n];
@@ -211,28 +212,43 @@ final class Plaza
     {
         if ($x < 0 || $y < 0 || $x >= self::WIDTH || $y >= self::HEIGHT) return false;
         if (! in_array(self::MAP[$y][$x], ['.', ',', ':', '*', '+'], true)) return false;
-        foreach (self::npcs() as $npc) {
-            if ($npc['x'] === $x && $npc['y'] === $y) return false;
-        }
+        static $keepers = null;
+        $keepers ??= array_flip(array_map(static fn ($n) => $n['x'].','.$n['y'], self::npcs()));
 
-        return true;
+        return ! isset($keepers[$x.','.$y]);
     }
 
     public static function npc(string $id): ?array
     {
-        foreach (self::npcs() as $npc) {
-            if ($npc['id'] === $id) return $npc;
-        }
+        static $byId = null;
+        $byId ??= array_column(self::npcs(), null, 'id');
 
-        return null;
+        return $byId[$id] ?? null;
     }
 
-    /** What a keeper says right now; the seer reads the omens instead of reciting lines. */
-    public static function line(array $npc, int $ms, string $hero): string
+    /** Keepers as the client sees them (no lines). */
+    public static function keepers(): array
+    {
+        return array_map(static fn ($n) => array_intersect_key($n, array_flip(['id', 'name', 'kind', 'service', 'x', 'y'])), self::npcs());
+    }
+
+    /** What townsfolk on their rounds answer, by kind. */
+    public const WALKER_LINES = ['guard'=>['Порядок в городе. Проходите.', 'Ночью у ворот тихо. Слишком тихо.', 'Из Разлома вернулись? Сдайте оружие… шучу.'],
+        'dog'=>['Гав!', 'Р-р-р… гав!', '*виляет хвостом*'], 'child'=>['Догони меня! Не догонишь!', 'А я видел дракона! Почти.', 'Ты герой? Настоящий?'],
+        'cat'=>['Мяу.', '*трётся о ногу*', '*щурится на огонь*'], 'bird'=>['Курлык.', '*голуби взлетают и садятся снова*'],
+        'townsfolk'=>['Хорошего дня, путник. Да хранят тебя огни.', 'Говорят, в шахтах опять неспокойно.', 'Огни горят — значит, живём.'],
+        'merchant'=>['Пирожки! Горячие пирожки!', 'Свежий хлеб, почти даром!', 'Купи пирожок — в Разломе не накормят.']];
+
+    /**
+     * What a keeper says; the seer reads the omens instead of reciting lines. Without $turn the
+     * line follows the wall clock; with it (the live town counts each hero's talks) every new
+     * talk moves to the next line.
+     */
+    public static function line(array $npc, int $ms, string $hero, ?int $turn = null): string
     {
         if ($npc['service'] === 'omens') {
             $omens = array_values(Catalog::omens());
-            $omen = $omens[(intdiv($ms, 9000) + crc32($hero)) % count($omens)];
+            $omen = $omens[(($turn ?? intdiv($ms, 9000)) + crc32($hero)) % count($omens)];
 
             return 'Вижу знамение: «'.$omen['name'].'». '.$omen['description'].' Будь готов.';
         }
@@ -240,6 +256,14 @@ final class Plaza
             return $npc['name'].' покачивается и молча ждёт удара.';
         }
 
-        return $npc['lines'][(intdiv($ms, 7000) + crc32($hero.$npc['id'])) % count($npc['lines'])];
+        return $npc['lines'][(($turn ?? intdiv($ms, 7000)) + crc32($hero.$npc['id'])) % count($npc['lines'])];
+    }
+
+    /** A walker's greeting: the kind's lines in turn. */
+    public static function walkerLine(string $kind, int $turn): string
+    {
+        $lines = self::WALKER_LINES[$kind] ?? ['…'];
+
+        return $lines[$turn % count($lines)];
     }
 }

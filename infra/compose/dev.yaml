@@ -14,7 +14,8 @@ x-app: &app
     DB_DATABASE: grim_hollow
     DB_USERNAME: grim
     DB_PASSWORD: ${DB_PASSWORD:?Run tools/setup.ps1 first}
-    CACHE_STORE: database
+    # APCu: rate limits and cache live in the PHP memory instead of MySQL transactions.
+    CACHE_STORE: apc
     SESSION_DRIVER: array
     LOG_CHANNEL: stderr
   init: true
