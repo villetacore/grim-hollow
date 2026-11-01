@@ -5862,16 +5862,16 @@
         },
         {
             "name": "workerman/coroutine",
-            "version": "v1.1.6",
+            "version": "v1.1.7",
             "source": {
                 "type": "git",
                 "url": "https://github.com/workerman-php/coroutine.git",
-                "reference": "918c10be5270a74f91ff77cc66b6a821cc456a25"
+                "reference": "68a905d50f7ec1efcedc1ec317a75dcc3dea3f0f"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/workerman-php/coroutine/zipball/918c10be5270a74f91ff77cc66b6a821cc456a25",
-                "reference": "918c10be5270a74f91ff77cc66b6a821cc456a25",
+                "url": "https://api.github.com/repos/workerman-php/coroutine/zipball/68a905d50f7ec1efcedc1ec317a75dcc3dea3f0f",
+                "reference": "68a905d50f7ec1efcedc1ec317a75dcc3dea3f0f",
                 "shasum": ""
             },
             "require": {
@@ -5896,22 +5896,22 @@
             "description": "Workerman coroutine",
             "support": {
                 "issues": "https://github.com/workerman-php/coroutine/issues",
-                "source": "https://github.com/workerman-php/coroutine/tree/v1.1.6"
+                "source": "https://github.com/workerman-php/coroutine/tree/v1.1.7"
             },
-            "time": "2026-07-26T14:42:35+00:00"
+            "time": "2026-10-24T05:06:43+00:00"
         },
         {
             "name": "workerman/workerman",
-            "version": "v5.2.2",
+            "version": "v5.2.3",
             "source": {
                 "type": "git",
                 "url": "https://github.com/walkor/workerman.git",
-                "reference": "a0866601af066c0eab5a2f7b9aef8bdda8fa1911"
+                "reference": "8fd5c148ff7dcd7bbc88621e1712eeb1f66b7f56"
             },
             "dist": {
                 "type": "zip",
-                "url": "https://api.github.com/repos/walkor/workerman/zipball/a0866601af066c0eab5a2f7b9aef8bdda8fa1911",
-                "reference": "a0866601af066c0eab5a2f7b9aef8bdda8fa1911",
+                "url": "https://api.github.com/repos/walkor/workerman/zipball/8fd5c148ff7dcd7bbc88621e1712eeb1f66b7f56",
+                "reference": "8fd5c148ff7dcd7bbc88621e1712eeb1f66b7f56",
                 "shasum": ""
             },
             "require": {
@@ -5974,7 +5974,7 @@
                     "type": "patreon"
                 }
             ],
-            "time": "2026-06-04T07:31:34+00:00"
+            "time": "2026-10-09T01:12:31+00:00"
         }
     ],
     "packages-dev": [
